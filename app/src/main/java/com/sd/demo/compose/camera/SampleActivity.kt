@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -24,8 +25,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -110,6 +111,8 @@ private fun CameraContent(
   var selectedCameraId by rememberSaveable { mutableStateOf<String?>(null) }
   var mirrorMode by rememberSaveable { mutableStateOf(CameraMirrorMode.AUTO) }
 
+  val previewResolution = state.previewResolution.value
+
   LaunchedEffect(devices, devicesLoading) {
     if (!devicesLoading && devices.none { it.cameraId == selectedCameraId }) {
       selectedCameraId = devices.firstOrNull()?.cameraId
@@ -122,14 +125,14 @@ private fun CameraContent(
     horizontalAlignment = Alignment.CenterHorizontally,
   ) {
     Box(
-      modifier = Modifier
-        .fillMaxWidth()
-        .aspectRatio(1f),
+      modifier = Modifier.fillMaxWidth(),
       contentAlignment = Alignment.Center,
     ) {
       if (selectedCamera != null) {
         CameraPreview(
-          modifier = Modifier.fillMaxSize(),
+          modifier = Modifier
+            .width(150.dp)
+            .aspectRatio(1f),
           state = state,
           devicesState = devicesState,
           cameraId = selectedCamera.cameraId,
@@ -144,6 +147,11 @@ private fun CameraContent(
         }
         Text(text = message)
       }
+
+      Text(
+        modifier = Modifier.align(Alignment.TopEnd),
+        text = previewResolution.toString(),
+      )
     }
 
     selectedCamera?.also { camera ->
