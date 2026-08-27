@@ -36,6 +36,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sd.demo.compose.camera.theme.AppTheme
+import com.sd.lib.compose.camera.CameraMirrorMode
 import com.sd.lib.compose.camera.CameraPreview
 import com.sd.lib.compose.camera.rememberCameraDevicesState
 import com.sd.lib.compose.camera.rememberCameraPreviewState
@@ -107,6 +108,7 @@ private fun CameraContent(
   val devices by devicesState.devices
   val devicesLoading by devicesState.isLoading
   var selectedCameraId by rememberSaveable { mutableStateOf<String?>(null) }
+  var mirrorMode by rememberSaveable { mutableStateOf(CameraMirrorMode.AUTO) }
 
   LaunchedEffect(devices, devicesLoading) {
     if (!devicesLoading && devices.none { it.cameraId == selectedCameraId }) {
@@ -131,6 +133,7 @@ private fun CameraContent(
           state = state,
           devicesState = devicesState,
           cameraId = selectedCamera.cameraId,
+          mirrorMode = mirrorMode,
           onError = { error -> logMsg { "onError ${error.stackTraceToString()}" } },
         )
       } else {
@@ -157,6 +160,18 @@ private fun CameraContent(
       },
     ) {
       Text(text = "切换")
+    }
+
+    Button(
+      onClick = {
+        mirrorMode = when (mirrorMode) {
+          CameraMirrorMode.AUTO -> CameraMirrorMode.ON
+          CameraMirrorMode.ON -> CameraMirrorMode.OFF
+          CameraMirrorMode.OFF -> CameraMirrorMode.AUTO
+        }
+      },
+    ) {
+      Text(text = "镜像：$mirrorMode")
     }
   }
 }

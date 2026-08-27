@@ -9,6 +9,7 @@ import android.view.View
 import androidx.camera.compose.CameraXViewfinder
 import androidx.camera.core.SurfaceRequest
 import androidx.camera.viewfinder.compose.MutableCoordinateTransformer
+import androidx.camera.viewfinder.core.ImplementationMode
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -246,6 +247,7 @@ private fun CameraPreviewViewfinder(
         modifier = Modifier
           .matchParentSize()
           .graphicsLayer { scaleX = if (needsAdditionalMirror) -1f else 1f },
+        implementationMode = ImplementationMode.EMBEDDED,
         coordinateTransformer = coordinateTransformer,
         contentScale = contentScale,
       )

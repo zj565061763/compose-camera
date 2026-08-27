@@ -5,6 +5,9 @@ import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.graphics.PixelFormat
 import android.os.Looper
+import android.view.TextureView
+import android.view.View
+import android.view.ViewGroup
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -124,6 +127,45 @@ class CameraPreviewIntegrationTest {
     assertThat(error.get()).isNull()
     assertThat(state.previewResolution.value).isNotEqualTo(IntSize.Zero)
     assertThat(activeAnalysisThreadCount()).isAtMost(initialAnalysisThreadCount)
+  }
+
+  @Test
+  fun mirrorMode_usesEmbeddedViewfinderWithoutRestartingSession() {
+    assumeFrontOrBackCameraAvailable()
+    val mirrorMode = mutableStateOf(CameraMirrorMode.AUTO)
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>(null)
+
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(240.dp),
+        state = state,
+        mirrorMode = mirrorMode.value,
+        onError = error::set,
+      )
+    }
+
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      error.get() != null || state.previewResolution.value != IntSize.Zero
+    }
+    assertThat(error.get()).isNull()
+
+    lateinit var initialTextureView: TextureView
+    lateinit var initialTransformIdentity: CameraFrameTransformIdentity
+    _composeRule.runOnIdle {
+      initialTextureView = checkNotNull(_composeRule.activity.window.decorView.findTextureView())
+      initialTransformIdentity = checkNotNull(state.currentTransformIdentity())
+      mirrorMode.value = CameraMirrorMode.ON
+    }
+    _composeRule.waitForIdle()
+    _composeRule.runOnIdle { mirrorMode.value = CameraMirrorMode.OFF }
+    _composeRule.waitForIdle()
+
+    _composeRule.runOnIdle {
+      assertThat(_composeRule.activity.window.decorView.findTextureView()).isSameInstanceAs(initialTextureView)
+      assertThat(state.currentTransformIdentity()).isNotSameInstanceAs(initialTransformIdentity)
+      assertThat(error.get()).isNull()
+    }
   }
 
   @Test
@@ -648,6 +690,15 @@ private fun hasFrontOrBackCameraFeature(
 ): Boolean {
   return hasSystemFeature(PackageManager.FEATURE_CAMERA) ||
     hasSystemFeature(PackageManager.FEATURE_CAMERA_FRONT)
+}
+
+private fun View.findTextureView(): TextureView? {
+  if (this is TextureView) return this
+  if (this !is ViewGroup) return null
+  repeat(childCount) { index ->
+    getChildAt(index).findTextureView()?.also { return it }
+  }
+  return null
 }
 
 private class FakeLifecycleOwner : LifecycleOwner {

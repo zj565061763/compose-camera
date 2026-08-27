@@ -44,6 +44,7 @@
 - `DisposableEffect` 只在上下文、LifecycleOwner、状态实例、cameraId、显示旋转、是否启用帧回调、有效帧格式、retry generation、首次加载状态或相关设备快照变化时重建会话。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，禁止同一状态实例再次组合时重放已消费的 `retry()`。
 - 普通布局尺寸、`contentScale` 和镜像模式变化只更新显示和坐标状态，不得重复绑定相机。
+- `CameraXViewfinder` 固定使用 `ImplementationMode.EMBEDDED`，确保额外的 `graphicsLayer` 镜像作用于预览 Surface；不得改回默认 `EXTERNAL`，除非额外镜像已改为 Surface 内部变换。
 - `cameraId == null` 时只有设备快照中的第一个 cameraId 参与重建 key；精确选择时只有目标 cameraId 是否存在参与重建 key。
 - 绑定时必须以 `ProcessCameraProvider.hasCamera()` 的当前结果为准；设备快照只决定何时启动或重建会话，不能否决 CameraX 当前已识别的 cameraId。
 - Controller 始终创建 `Preview`；仅在 `onFrame != null` 时创建 `ImageAnalysis` 和专用单线程 executor。
@@ -93,7 +94,7 @@ CameraX 上游镜像轴修复于 2026-06-10 合入：
 ## 测试与验证
 
 - `CameraPreviewStateTest.kt` 覆盖矩阵、镜像、旋转、request/transform identity、publication gate、分辨率和布局 generation、设备状态、错误订阅、帧关闭、错误映射及异常安全清理。
-- `CameraPreviewIntegrationTest.kt` 覆盖真实 CameraX 的 YUV/RGBA、无分析资源、精确 cameraId、retry、布局 token、设备枚举错误转发、组合释放和 Lifecycle 销毁。
+- `CameraPreviewIntegrationTest.kt` 覆盖真实 CameraX 的 YUV/RGBA、无分析资源、嵌入式镜像渲染、精确 cameraId、retry、布局 token、设备枚举错误转发、组合释放和 Lifecycle 销毁。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - 异步测试使用有超时的等待，禁止固定 `sleep`；优先使用轻量 Fake、Google Truth 和显式 `AndroidJUnit4`。
 - 真实相机测试按设备实际 CameraX 能力跳过不满足前提的场景。
