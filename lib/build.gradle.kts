@@ -36,11 +36,7 @@ dependencies {
   val composeBom = platform(libs.androidx.compose.bom)
   implementation(composeBom)
   implementation(libs.androidx.compose.foundation)
-
-  api(libs.androidx.camera.core)
-  api(libs.androidx.camera.camera2)
-  api(libs.androidx.camera.lifecycle)
-  api(libs.androidx.camera.compose)
+  implementation(libs.androidx.lifecycle.runtimeCompose)
 
   androidTestImplementation(composeBom)
   androidTestImplementation(libs.androidx.activity.compose)
