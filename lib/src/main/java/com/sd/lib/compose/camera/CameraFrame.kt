@@ -10,15 +10,13 @@ import java.io.ByteArrayOutputStream
 /**
  * 预览回调产生的分析帧。
  *
- * [format] 表示 [data] 的实际格式。
- * [data] 只在 `CameraPreview.onFrame` 回调期间有效。
+ * [data] 是 NV21 数据，只在 `CameraPreview.onFrame` 回调期间有效。
  * 需要异步处理时应在回调内复制数据，或先通过 [toBitmap] 创建独立图片。
  * [width] 和 [height] 表示未旋转的原始帧尺寸。
  * [rotationDegrees] 表示把原始帧顺时针旋转到当前预览方向所需的角度。
  */
 class CameraFrame internal constructor(
   val data: ByteArray,
-  val format: CameraFrameFormat,
   val width: Int,
   val height: Int,
   val rotationDegrees: Int,
@@ -29,10 +27,7 @@ class CameraFrame internal constructor(
 
   /** 把当前帧数据转换为独立的未旋转 Bitmap，转换失败时返回 `null`。 */
   fun toBitmap(): Bitmap? {
-    val imageData = when (format) {
-      CameraFrameFormat.NV21 -> nv21ToJpeg(data, width, height) ?: return null
-      CameraFrameFormat.JPEG -> data
-    }
+    val imageData = nv21ToJpeg(data, width, height) ?: return null
     return BitmapFactory.decodeByteArray(imageData, 0, imageData.size)
   }
 }

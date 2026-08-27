@@ -61,7 +61,6 @@ class CameraPreviewIntegrationTest {
               FrameResult(
                 width = frame.width,
                 height = frame.height,
-                format = frame.format,
                 bitmapWidth = bitmap.width,
                 bitmapHeight = bitmap.height,
                 rotationDegrees = frame.rotationDegrees,
@@ -80,36 +79,10 @@ class CameraPreviewIntegrationTest {
     val result = checkNotNull(frameResult.get())
     assertThat(result.width).isGreaterThan(0)
     assertThat(result.height).isGreaterThan(0)
-    assertThat(result.format).isEqualTo(CameraFrameFormat.NV21)
     assertThat(result.bitmapWidth).isEqualTo(result.width)
     assertThat(result.bitmapHeight).isEqualTo(result.height)
     assertThat(result.rotationDegrees).isEqualTo(expectedRotation)
     assertThat(result.threadName).isEqualTo(CAMERA_ANALYSIS_THREAD_NAME)
-  }
-
-  @Test
-  fun cameraPreview_publishesJpegFrame() {
-    assumeCameraAvailable()
-    val frameReceived = CountDownLatch(1)
-    val result = AtomicReference<CameraFrameFormat?>()
-    val error = AtomicReference<Throwable?>()
-
-    _composeRule.setContent {
-      CameraPreview(
-        modifier = Modifier.size(240.dp),
-        frameFormat = CameraFrameFormat.JPEG,
-        onError = error::set,
-        onFrame = { frame ->
-          val bitmap = frame.toBitmap() ?: return@CameraPreview
-          bitmap.recycle()
-          if (result.compareAndSet(null, frame.format)) frameReceived.countDown()
-        },
-      )
-    }
-
-    assertThat(frameReceived.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
-    assertThat(error.get()).isNull()
-    assertThat(result.get()).isEqualTo(CameraFrameFormat.JPEG)
   }
 
   @Test
@@ -337,7 +310,6 @@ class CameraPreviewIntegrationTest {
   private data class FrameResult(
     val width: Int,
     val height: Int,
-    val format: CameraFrameFormat,
     val bitmapWidth: Int,
     val bitmapHeight: Int,
     val rotationDegrees: Int,

@@ -12,7 +12,7 @@
 
 - 修改 `lib` 中的相机生命周期、设备枚举、错误转发、帧回调、预览尺寸、旋转、镜像或坐标转换前，必须完整阅读 `REVIEW_NOTES.md`。该文件是行为不变量和回归测试清单的权威记录。
 - `README.md` 描述公开 API 的使用契约。公开行为、示例或依赖发生变化时，必须同步检查并更新。
-- 当前内部使用 Android 平台相机 API，公开 API 不得暴露具体后端类型；替换相机后端时必须重新验证 cameraId、帧格式、旋转、镜像和预览坐标转换。
+- 当前内部使用 Android 平台相机 API，公开 API 不得暴露具体后端类型；替换相机后端时必须重新验证 cameraId、帧数据、旋转、镜像和预览坐标转换。
 
 ## 构建环境
 
@@ -81,12 +81,12 @@ git diff --check
 
 ## 公开 API 与状态边界
 
-- `CameraPreview` 是入口 Composable；通过 nullable cameraId、`CameraMirrorMode`、`ContentScale`、显示旋转和 `CameraFrameFormat` 配置预览。
+- `CameraPreview` 是入口 Composable；通过 nullable cameraId、`CameraMirrorMode`、`ContentScale` 和显示旋转配置预览。
 - `cameraId` 对调用方是不透明的 `String`，不得公开当前后端的数字 ID 语义或列表排序契约。
 - `CameraPreviewState` 属于单个正在组合的预览，保存 `previewResolution`、retry generation 和帧到预览的变换快照，不能在多个同时存在的预览间共享。
 - `CameraDevicesState` 表示最近一次枚举到的设备列表、加载或错误状态和主动刷新入口，可由设备选择 UI 与多个预览共享；共享设备状态不代表支持不同 cameraId 同时预览。
 - `CameraFrame.data` 只保证在同步 `onFrame` 回调期间有效；允许跨回调保留的是数据副本、独立 `Bitmap` 或轻量 `CameraFrameTransformToken`。
-- `CameraFrame` 只能在数据、格式、宽高和旋转都有效时创建；公开的 `toBitmap()` 转换失败时返回 `null`。
+- `CameraFrame` 只能在 NV21 数据、宽高和旋转都有效时创建；公开的 `toBitmap()` 转换失败时返回 `null`。
 
 ## 设备发现与手动刷新
 
@@ -102,7 +102,7 @@ git diff --check
 - 只有获得非零布局尺寸且设备枚举完成后，才创建 `CameraPreviewController`。
 - 会话必须同时受 Lifecycle 和 `TextureView.SurfaceTexture` 生命周期约束；Lifecycle 停止、Surface 销毁或组件释放时关闭相机。
 - 普通布局尺寸、`contentScale`、镜像模式和用户 lambda 变化只更新显示、坐标或回调引用，不得重复打开相机。
-- displayRotation、cameraId、帧回调启用状态、有效帧格式和 retry generation 变化需要重建会话。
+- displayRotation、cameraId、帧回调启用状态和 retry generation 变化需要重建会话。
 - 只有 `onFrame != null` 时才创建回调缓冲区和专用单线程 executor。
 - Controller 只释放自己打开的相机和创建的线程，禁止影响进程内其他相机使用方。
 - 库不协调并发相机会话，不支持不同 cameraId 同时预览。
@@ -131,8 +131,8 @@ git diff --check
 
 ## 测试布局与改动映射
 
-- `CameraPreviewStateTest.kt` 覆盖矩阵、前后摄像头旋转、镜像、transform identity、预览尺寸选择、对焦调度、帧格式、帧缓冲区、错误聚合和异常安全清理。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、JPEG、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和分析线程。
+- `CameraPreviewStateTest.kt` 覆盖矩阵、前后摄像头旋转、镜像、transform identity、预览尺寸选择、对焦调度、NV21、帧缓冲区、错误聚合和异常安全清理。
+- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和分析线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - `app/src/main/java/.../SampleActivity.kt` 是权限、设备切换、镜像切换和手动真机验证入口。
 - 纯计算逻辑优先放入 JVM 测试；依赖 Android 图形类型、Lifecycle、权限或 Compose 集成的行为放入仪器测试。

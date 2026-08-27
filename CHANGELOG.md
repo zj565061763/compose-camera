@@ -4,7 +4,7 @@
 
 ### ✨ Features
 
-- 新增 `CameraFrameFormat.NV21` 和 `CameraFrameFormat.JPEG`，帧数据通过 `CameraFrame.data` 暴露。
+- 帧数据通过 `CameraFrame.data` 以 NV21 格式暴露。
 - 新增可覆盖的 `displayRotation`，默认自动监听当前显示器旋转。
 
 ### ♻️ Changes

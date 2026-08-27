@@ -16,7 +16,7 @@
 - `CameraPreviewState` 属于单个正在组合的预览，不能在多个同时存在的预览间共享。
 - `CameraDevicesState` 可以由设备选择 UI 和多个预览共享；共享设备状态不代表支持多个相机会话同时运行。
 - `CameraPreviewState.previewResolution` 表示当前会话使用的原始预览帧分辨率，不是 Compose 布局尺寸；会话未运行时为 `IntSize.Zero`。
-- `onFrame` 默认为 `null`。非空时，默认输出 NV21，也可以选择在分析线程编码后的 JPEG。
+- `onFrame` 默认为 `null`。非空时输出 NV21 数据。
 - `CameraFrame.data` 只保证在同步回调期间有效。允许跨回调保留的是复制后的数据、`Bitmap` 或轻量 `CameraFrameTransformToken`。
 - `CameraFrame.toBitmap()` 返回未旋转的独立图片，转换失败时返回 `null`，不抛出普通转换异常。
 - `mirrorMode` 只影响预览和坐标矩阵，不修改帧数据。
@@ -37,7 +37,7 @@
 
 - `CameraPreview` 只有获得非零 Compose 布局宽高且设备首次枚举完成后，才创建 `CameraPreviewController`。零尺寸是正常的隐藏或布局过渡，不报告错误。
 - 会话由 `LifecycleOwner` 和 `TextureView.SurfaceTexture` 共同控制；Lifecycle 进入 `STARTED` 且 Surface 可用时打开，进入 `STOPPED`、Surface 销毁或组件释放时关闭。
-- 显示旋转、cameraId、是否启用帧回调、有效帧格式、retry generation 或相关设备快照变化会重建会话。
+- 显示旋转、cameraId、是否启用帧回调、retry generation 或相关设备快照变化会重建会话。
 - 普通布局尺寸、`contentScale`、镜像模式、`onFrame` 或 `onError` lambda 实例变化不得重复打开相机。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
 - Controller 只释放自己打开的相机和创建的帧线程，不得影响进程内其他相机使用方。
@@ -62,7 +62,6 @@
 - 只有 `onFrame != null` 时才创建名为 `CameraPreview-Analysis` 的专用单线程 executor 和三个 NV21 回调缓冲区。
 - 分发策略保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - NV21 帧宽高必须为正偶数，所需字节数必须能安全表示为 `Int`，实际数据长度不得小于 `width × height × 3 / 2`。不符合条件的回调缓冲区直接归还，不创建 `CameraFrame`。
-- JPEG 格式在分析线程从 NV21 编码，不得在相机回调线程执行压缩。
 - 每个相机回调缓冲区都必须在处理完成、被替换、被丢弃或 dispatcher 关闭时归还。
 - 帧回调异常和缓冲区归还异常必须保留正确的主异常及 suppressed 异常；致命 `Error` 不得作为业务异常吞掉。
 - 释放会丢弃尚未开始的帧，但不能中断已经开始的同步回调。
@@ -78,8 +77,8 @@
 
 ## 测试与验证
 
-- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、token 失效、尺寸选择、对焦调度、NV21 校验、JPEG 转换、最新帧分发和异常安全清理。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、JPEG、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和分析线程。
+- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、token 失效、尺寸选择、对焦调度、NV21 校验、Bitmap 转换、最新帧分发和异常安全清理。
+- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和分析线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - 异步测试使用有超时的等待，禁止固定 `sleep`；优先使用轻量 Fake、Google Truth 和显式 `AndroidJUnit4`。
 - 真实相机测试按设备能力跳过没有相机的场景。

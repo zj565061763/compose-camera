@@ -34,8 +34,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
  * Compose 摄像头预览。
  *
  * [onFrame] 非空时在 `CameraPreview-Analysis` 单线程同步接收最新帧；
- * [CameraFrame.data] 只在回调期间有效，异步处理前必须复制数据或调用 [CameraFrame.toBitmap]。
- * [frameFormat] 控制回调数据格式，JPEG 编码在分析线程完成。
+ * [CameraFrame.data] 是 NV21 数据，只在回调期间有效，异步处理前必须复制数据或调用 [CameraFrame.toBitmap]。
  *
  * [cameraId] 是不透明的摄像头标识；为 `null` 时选择设备列表中的第一项。
  * [mirrorMode] 只影响预览和坐标矩阵，不修改帧数据。
@@ -51,7 +50,6 @@ fun CameraPreview(
   mirrorMode: CameraMirrorMode = CameraMirrorMode.AUTO,
   contentScale: ContentScale = ContentScale.Crop,
   displayRotation: Int? = null,
-  frameFormat: CameraFrameFormat = CameraFrameFormat.NV21,
   onError: (Throwable) -> Unit = {},
   onFrame: ((CameraFrame) -> Unit)? = null,
 ) {
@@ -69,7 +67,6 @@ fun CameraPreview(
   val currentOnError by rememberUpdatedState(onError)
   val errorDispatcher = remember { MainThreadErrorDispatcher { error -> currentOnError(error) } }
   val hasFrameCallback = onFrame != null
-  val effectiveFrameFormat = frameFormat.takeIf { hasFrameCallback }
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
   var activePreviewMirrored by remember { mutableStateOf<Boolean?>(null) }
 
@@ -114,7 +111,6 @@ fun CameraPreview(
     effectiveDisplayRotation,
     hasValidPreviewSize,
     hasFrameCallback,
-    effectiveFrameFormat,
     retryGeneration,
     hasLoadedCameraDevices,
     cameraDeviceKey,
@@ -128,7 +124,6 @@ fun CameraPreview(
         cameraId = cameraId,
         displayRotation = effectiveDisplayRotation,
         previewViewSize = previewSize,
-        frameFormat = frameFormat,
         transformIdentityProvider = state::currentTransformIdentity,
         onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
           activePreviewMirrored = isPreviewMirrored

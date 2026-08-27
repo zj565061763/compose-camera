@@ -269,7 +269,6 @@ class CameraPreviewStateTest {
     val returned = mutableListOf<Int>()
     val error = AtomicReference<Throwable?>()
     val dispatcher = CameraFrameDispatcher(
-      frameFormat = CameraFrameFormat.NV21,
       onFrame = { frame ->
         synchronized(seen) { seen += frame.data[0].toInt() }
         if (frame.data[0].toInt() == 1) {
@@ -300,31 +299,6 @@ class CameraPreviewStateTest {
     val callback = CountDownLatch(1)
     val returned = CountDownLatch(1)
     val dispatcher = CameraFrameDispatcher(
-      frameFormat = CameraFrameFormat.NV21,
-      onFrame = { callback.countDown() },
-      onError = {},
-    )
-
-    dispatcher.offer(
-      data = ByteArray(1),
-      width = 640,
-      height = 480,
-      rotationDegrees = 0,
-      transformIdentity = CameraFrameTransformIdentity(),
-      returnBuffer = { returned.countDown() },
-    )
-
-    assertThat(returned.await(1, TimeUnit.SECONDS)).isTrue()
-    assertThat(callback.await(100, TimeUnit.MILLISECONDS)).isFalse()
-    dispatcher.close()
-  }
-
-  @Test
-  fun frameDispatcher_jpegRejectsInvalidNv21Source() {
-    val callback = CountDownLatch(1)
-    val returned = CountDownLatch(1)
-    val dispatcher = CameraFrameDispatcher(
-      frameFormat = CameraFrameFormat.JPEG,
       onFrame = { callback.countDown() },
       onError = {},
     )
@@ -370,7 +344,6 @@ class CameraPreviewStateTest {
     val receivedFailure = AtomicReference<Throwable?>()
     val failureReceived = CountDownLatch(1)
     val dispatcher = CameraFrameDispatcher(
-      frameFormat = CameraFrameFormat.NV21,
       onFrame = { throw callbackFailure },
       onError = { error ->
         receivedFailure.set(error)
@@ -390,39 +363,6 @@ class CameraPreviewStateTest {
     assertThat(failureReceived.await(5, TimeUnit.SECONDS)).isTrue()
     assertThat(receivedFailure.get()).isSameInstanceAs(callbackFailure)
     assertThat(callbackFailure.suppressed.asList()).containsExactly(bufferFailure)
-    dispatcher.close()
-  }
-
-  @Test
-  fun frameDispatcher_jpegConvertsBeforeCallback() {
-    val callback = CountDownLatch(1)
-    val returned = CountDownLatch(1)
-    val result = AtomicReference<CameraFrame?>()
-    val dispatcher = CameraFrameDispatcher(
-      frameFormat = CameraFrameFormat.JPEG,
-      onFrame = { frame ->
-        result.set(frame)
-        callback.countDown()
-      },
-      onError = {},
-    )
-    val width = 4
-    val height = 4
-    val data = ByteArray(width * height * ImageFormat.getBitsPerPixel(ImageFormat.NV21) / 8) { 128.toByte() }
-
-    dispatcher.offer(
-      data = data,
-      width = width,
-      height = height,
-      rotationDegrees = 0,
-      transformIdentity = CameraFrameTransformIdentity(),
-      returnBuffer = { returned.countDown() },
-    )
-
-    assertThat(callback.await(5, TimeUnit.SECONDS)).isTrue()
-    assertThat(returned.await(5, TimeUnit.SECONDS)).isTrue()
-    assertThat(result.get()!!.format).isEqualTo(CameraFrameFormat.JPEG)
-    assertThat(result.get()!!.toBitmap()).isNotNull()
     dispatcher.close()
   }
 }
@@ -458,11 +398,9 @@ private fun frame(
   height: Int,
   rotationDegrees: Int,
   data: ByteArray = ByteArray(width * height * 3 / 2),
-  format: CameraFrameFormat = CameraFrameFormat.NV21,
 ): CameraFrame {
   return CameraFrame(
     data = data,
-    format = format,
     width = width,
     height = height,
     rotationDegrees = rotationDegrees,

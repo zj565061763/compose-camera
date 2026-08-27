@@ -24,7 +24,6 @@ internal class CameraPreviewController(
   private val cameraId: String?,
   private val displayRotation: Int,
   private val previewViewSize: IntSize,
-  frameFormat: CameraFrameFormat,
   private val transformIdentityProvider: () -> CameraFrameTransformIdentity?,
   private val onSessionStarted: (
     CameraFrameTransformIdentity,
@@ -37,7 +36,7 @@ internal class CameraPreviewController(
   private val onSessionClosed: (CameraFrameTransformIdentity?) -> Unit,
 ) : AutoCloseable {
   private val _frameDispatcher = onFrame?.let { callback ->
-    CameraFrameDispatcher(frameFormat, callback, onError)
+    CameraFrameDispatcher(callback, onError)
   }
   private val _mainHandler = Handler(Looper.getMainLooper())
   @Volatile
@@ -306,9 +305,8 @@ internal fun runCameraCleanupActions(
   return firstFailure
 }
 
-/** 单线程处理相机输出的 NV21 最新帧，并按目标格式发布和归还回调缓冲区。 */
+/** 单线程发布最新 NV21 帧，并在处理完成或被替换时归还回调缓冲区。 */
 internal class CameraFrameDispatcher(
-  private val frameFormat: CameraFrameFormat,
   private val onFrame: (CameraFrame) -> Unit,
   private val onError: (Throwable) -> Unit,
 ) : AutoCloseable {
@@ -369,22 +367,15 @@ internal class CameraFrameDispatcher(
 
       var failure: Throwable? = null
       try {
-        val frameData = when (frameFormat) {
-          CameraFrameFormat.NV21 -> pending.data
-          CameraFrameFormat.JPEG -> nv21ToJpeg(pending.data, pending.width, pending.height)
-        }
-        frameData?.also { data ->
-          onFrame(
-            CameraFrame(
-              data = data,
-              format = frameFormat,
-              width = pending.width,
-              height = pending.height,
-              rotationDegrees = pending.rotationDegrees,
-              transformIdentity = pending.transformIdentity,
-            ),
-          )
-        }
+        onFrame(
+          CameraFrame(
+            data = pending.data,
+            width = pending.width,
+            height = pending.height,
+            rotationDegrees = pending.rotationDegrees,
+            transformIdentity = pending.transformIdentity,
+          ),
+        )
       } catch (error: Throwable) {
         failure = error
       } finally {
