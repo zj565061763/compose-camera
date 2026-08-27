@@ -37,10 +37,12 @@
 
 - `CameraPreview` 只有获得非零 Compose 布局宽高且设备首次枚举完成后，才创建 `CameraPreviewController`。零尺寸是正常的隐藏或布局过渡，不报告错误。
 - 会话由 `LifecycleOwner` 和 `TextureView.SurfaceTexture` 共同控制；Lifecycle 进入 `STARTED` 且 Surface 可用时打开，进入 `STOPPED`、Surface 销毁或组件释放时关闭。
+- Surface 销毁回调必须转移释放责任，先在相机线程停止会话，再释放 `SurfaceTexture`。
 - 显示旋转、cameraId、是否启用帧回调、retry generation 或相关设备快照变化会重建会话。
 - 普通布局尺寸、`contentScale`、镜像模式、`onFrame` 或 `onError` lambda 实例变化不得重复打开相机。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
-- Controller 只释放自己打开的相机和创建的帧线程，不得影响进程内其他相机使用方。
+- Controller 在 `CameraPreview-Camera` 专用线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作。
+- Controller 只释放自己打开的相机和创建的工作线程，不得影响进程内其他相机使用方。
 - 打开、配置或运行错误会停止当前会话；外部条件恢复后可以调用 `CameraPreviewState.retry()`。
 
 ## 预览尺寸、旋转与镜像
@@ -78,7 +80,7 @@
 ## 测试与验证
 
 - `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、token 失效、尺寸选择、对焦调度、NV21 校验、Bitmap 转换、最新帧分发和异常安全清理。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和分析线程。
+- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和工作线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - 异步测试使用有超时的等待，禁止固定 `sleep`；优先使用轻量 Fake、Google Truth 和显式 `AndroidJUnit4`。
 - 真实相机测试按设备能力跳过没有相机的场景。

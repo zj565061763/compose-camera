@@ -101,10 +101,11 @@ git diff --check
 - `CameraPreview` 负责 Compose 尺寸、显示旋转、设备快照、错误订阅和 retry generation。
 - 只有获得非零布局尺寸且设备枚举完成后，才创建 `CameraPreviewController`。
 - 会话必须同时受 Lifecycle 和 `TextureView.SurfaceTexture` 生命周期约束；Lifecycle 停止、Surface 销毁或组件释放时关闭相机。
+- Surface 销毁时必须先在相机线程停止会话，再释放 `SurfaceTexture`。
 - 普通布局尺寸、`contentScale`、镜像模式和用户 lambda 变化只更新显示、坐标或回调引用，不得重复打开相机。
 - displayRotation、cameraId、帧回调启用状态和 retry generation 变化需要重建会话。
 - 只有 `onFrame != null` 时才创建回调缓冲区和专用单线程 executor。
-- Controller 只释放自己打开的相机和创建的线程，禁止影响进程内其他相机使用方。
+- Controller 在 `CameraPreview-Camera` 专用线程执行全部相机会话操作，只释放自己打开的相机和创建的线程，禁止影响进程内其他相机使用方。
 - 库不协调并发相机会话，不支持不同 cameraId 同时预览。
 
 ## 预览与帧坐标转换
@@ -121,6 +122,7 @@ git diff --check
 ## 线程、错误与清理
 
 - `onFrame` 在名为 `CameraPreview-Analysis` 的专用线程同步执行，只保留正在处理的帧和最新待处理帧。
+- 相机打开、配置、预览、对焦、回调缓冲区归还和释放统一在 `CameraPreview-Camera` 专用线程执行。
 - 优先使用连续对焦模式；只支持 `FOCUS_MODE_AUTO` 时，每秒重新触发一次对焦，并在会话停止时取消任务。
 - 每个相机回调缓冲区都必须在 `finally` 中归还。释放会丢弃尚未开始的帧，但不能中断已经开始的回调。
 - NV21 缓冲区必须在创建 `CameraFrame` 前验证正偶数宽高、整数溢出和最小数据长度。
@@ -132,7 +134,7 @@ git diff --check
 ## 测试布局与改动映射
 
 - `CameraPreviewStateTest.kt` 覆盖矩阵、前后摄像头旋转、镜像、transform identity、预览尺寸选择、对焦调度、NV21、帧缓冲区、错误聚合和异常安全清理。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和分析线程。
+- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和工作线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - `app/src/main/java/.../SampleActivity.kt` 是权限、设备切换、镜像切换和手动真机验证入口。
 - 纯计算逻辑优先放入 JVM 测试；依赖 Android 图形类型、Lifecycle、权限或 Compose 集成的行为放入仪器测试。

@@ -6,6 +6,7 @@ import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.view.Surface
 import android.view.TextureView
@@ -14,7 +15,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
 /** 管理一次 [CameraPreview] 会话和帧分发 */
@@ -39,35 +44,45 @@ internal class CameraPreviewController(
     CameraFrameDispatcher(callback, onError)
   }
   private val _mainHandler = Handler(Looper.getMainLooper())
-  @Volatile
+  private val _cameraThread = HandlerThread(CAMERA_OPERATION_THREAD_NAME).also { it.start() }
+  private val _cameraHandler = Handler(_cameraThread.looper)
   private var _camera: Camera? = null
   private var _periodicAutoFocus: PeriodicAutoFocus? = null
+  @Volatile
   private var _sessionIdentity: CameraFrameTransformIdentity? = null
-  private var _surfaceAvailable = textureView.isAvailable
+  private var _surfaceTexture: SurfaceTexture? = textureView.surfaceTexture.takeIf { textureView.isAvailable }
   private var _started = false
+  @Volatile
+  private var _shouldRun = false
+  @Volatile
+  private var _requestGeneration = 0L
+  private var _hasCameraSessionPermit = false
   @Volatile
   private var _closed = false
 
   private val _lifecycleObserver = LifecycleEventObserver { _, event ->
     when (event) {
-      Lifecycle.Event.ON_START -> startCameraIfReady()
-      Lifecycle.Event.ON_STOP -> stopCamera()
+      Lifecycle.Event.ON_START, Lifecycle.Event.ON_STOP -> updateCameraRequest()
       Lifecycle.Event.ON_DESTROY -> close()
       else -> Unit
     }
   }
   private val _surfaceTextureListener = object : TextureView.SurfaceTextureListener {
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-      _surfaceAvailable = true
-      startCameraIfReady()
+      _surfaceTexture = surface
+      updateCameraRequest()
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
 
     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-      _surfaceAvailable = false
-      stopCamera()
-      return true
+      if (_surfaceTexture === surface) {
+        _surfaceTexture = null
+        updateCameraRequest(surface)
+      } else {
+        surface.release()
+      }
+      return false
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
@@ -82,51 +97,93 @@ internal class CameraPreviewController(
     }
     lifecycleOwner.lifecycle.addObserver(_lifecycleObserver)
     textureView.surfaceTextureListener = _surfaceTextureListener
-    _surfaceAvailable = textureView.isAvailable
-    startCameraIfReady()
+    _surfaceTexture = textureView.surfaceTexture.takeIf { textureView.isAvailable }
+    updateCameraRequest()
   }
 
-  private fun startCameraIfReady() {
-    if (
-      _closed || _camera != null || !_surfaceAvailable ||
-      !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-    ) {
+  private fun updateCameraRequest(surfaceTextureToRelease: SurfaceTexture? = null) {
+    if (_closed) {
+      postStopCamera(surfaceTextureToRelease)
       return
     }
+    val surfaceTexture = _surfaceTexture
+    val shouldRun = _started && surfaceTexture != null &&
+      lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+    if (_shouldRun == shouldRun) {
+      if (surfaceTextureToRelease != null) postStopCamera(surfaceTextureToRelease)
+      return
+    }
+
+    _shouldRun = shouldRun
+    val generation = ++_requestGeneration
+    if (shouldRun) {
+      _cameraHandler.post { startCameraIfReady(generation, checkNotNull(surfaceTexture)) }
+    } else {
+      postStopCamera(surfaceTextureToRelease)
+    }
+  }
+
+  private fun postStopCamera(surfaceTextureToRelease: SurfaceTexture? = null) {
+    val posted = _cameraHandler.post {
+      try {
+        stopCamera()
+      } finally {
+        surfaceTextureToRelease?.release()
+      }
+    }
+    if (!posted) surfaceTextureToRelease?.release()
+  }
+
+  private fun startCameraIfReady(generation: Long, surfaceTexture: SurfaceTexture) {
+    checkCameraOperationThread()
+    if (!isCurrentStartRequest(generation) || _camera != null) return
 
     val numberOfCameras = try {
       Camera.getNumberOfCameras()
     } catch (error: Exception) {
-      failAndClose(error)
+      if (isCurrentStartRequest(generation)) failAndCloseFromCameraThread(error, generation)
       return
     }
+    if (!isCurrentStartRequest(generation)) return
     val resolvedCameraId = if (cameraId == null) {
       0.takeIf { numberOfCameras > 0 }
     } else {
       (0 until numberOfCameras).firstOrNull { id -> id.toString() == cameraId }
     }
     if (resolvedCameraId == null) {
-      failAndClose(cameraSelectionException(cameraId))
+      failAndCloseFromCameraThread(cameraSelectionException(cameraId), generation)
+      return
+    }
+    if (!acquireCameraSessionPermit(generation)) return
+    if (!isCurrentStartRequest(generation)) {
+      stopCamera()
       return
     }
 
-    val failure = try {
-      openCamera(resolvedCameraId)
-      null
+    try {
+      openCamera(resolvedCameraId, surfaceTexture, generation)
     } catch (error: Exception) {
-      cameraOpenException(resolvedCameraId, error)
-    }
-    failure?.also { error ->
-      onError(error)
+      if (isCurrentStartRequest(generation)) onError(cameraOpenException(resolvedCameraId, error))
       stopCamera()
+    } catch (error: Error) {
+      try {
+        stopCamera()
+      } catch (cleanupFailure: Throwable) {
+        if (cleanupFailure !== error) error.addSuppressed(cleanupFailure)
+      }
+      throw error
     }
   }
 
-  private fun openCamera(resolvedCameraId: Int) {
+  private fun openCamera(resolvedCameraId: Int, surfaceTexture: SurfaceTexture, generation: Long) {
     val cameraInfo = Camera.CameraInfo().also { Camera.getCameraInfo(resolvedCameraId, it) }
     val displayOrientation = calculateCameraDisplayOrientation(cameraInfo, displayRotation)
     val frameRotationDegrees = calculateCameraFrameRotation(cameraInfo, displayRotation)
     val camera = Camera.open(resolvedCameraId).also { _camera = it }
+    if (!isCurrentStartRequest(generation)) {
+      stopCamera()
+      return
+    }
     val parameters = camera.parameters
     parameters.previewFormat = ImageFormat.NV21
     val previewSize = choosePreviewSize(
@@ -144,33 +201,47 @@ internal class CameraPreviewController(
     val configuredSize = configuredParameters.previewSize
     val configuredFocusMode = configuredParameters.focusMode
     val bufferSize = IntSize(configuredSize.width, configuredSize.height)
-    val surfaceTexture = checkNotNull(textureView.surfaceTexture) { "TextureView surface is not available." }
     camera.setDisplayOrientation(displayOrientation)
     camera.setPreviewTexture(surfaceTexture)
     camera.setErrorCallback { errorCode, source ->
       if (!_closed && _camera === source) {
-        onError(cameraRuntimeException(errorCode))
+        if (isCurrentStartRequest(generation)) onError(cameraRuntimeException(errorCode))
         stopCamera()
       }
     }
 
     val sessionIdentity = CameraFrameTransformIdentity().also { _sessionIdentity = it }
-    onSessionStarted(
-      sessionIdentity,
-      bufferSize,
-      frameRotationDegrees,
-      cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT,
-    )
-    configureFrameCallback(camera, bufferSize, frameRotationDegrees)
+    val sessionPublished = callOnMainThread {
+      if (!isCurrentStartRequest(generation) || _sessionIdentity !== sessionIdentity) {
+        false
+      } else {
+        onSessionStarted(
+          sessionIdentity,
+          bufferSize,
+          frameRotationDegrees,
+          cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT,
+        )
+        true
+      }
+    }
+    if (!sessionPublished) {
+      stopCamera()
+      return
+    }
+    configureFrameCallback(camera, bufferSize, frameRotationDegrees, generation)
+    if (!isCurrentStartRequest(generation)) {
+      stopCamera()
+      return
+    }
     camera.startPreview()
-    if (configuredFocusMode == Camera.Parameters.FOCUS_MODE_AUTO) startPeriodicAutoFocus(camera)
+    if (configuredFocusMode == Camera.Parameters.FOCUS_MODE_AUTO) startPeriodicAutoFocus(camera, generation)
   }
 
-  private fun startPeriodicAutoFocus(camera: Camera) {
+  private fun startPeriodicAutoFocus(camera: Camera, generation: Long) {
     _periodicAutoFocus = PeriodicAutoFocus(
-      handler = _mainHandler,
+      handler = _cameraHandler,
       focus = {
-        if (!_closed && _camera === camera) {
+        if (_camera === camera && isCurrentStartRequest(generation)) {
           camera.cancelAutoFocus()
           camera.autoFocus(null)
         }
@@ -179,7 +250,12 @@ internal class CameraPreviewController(
     ).also { it.start() }
   }
 
-  private fun configureFrameCallback(camera: Camera, bufferSize: IntSize, rotationDegrees: Int) {
+  private fun configureFrameCallback(
+    camera: Camera,
+    bufferSize: IntSize,
+    rotationDegrees: Int,
+    generation: Long,
+  ) {
     val dispatcher = _frameDispatcher ?: return
     val bufferBytes = checkNotNull(nv21BufferSize(bufferSize.width, bufferSize.height)) {
       "The camera reported an invalid NV21 preview size: $bufferSize."
@@ -187,16 +263,52 @@ internal class CameraPreviewController(
     repeat(CAMERA_CALLBACK_BUFFER_COUNT) { camera.addCallbackBuffer(ByteArray(bufferBytes)) }
     camera.setPreviewCallbackWithBuffer { data, source ->
       if (_closed || _camera !== source) return@setPreviewCallbackWithBuffer
+      if (!isCurrentStartRequest(generation)) {
+        source.addCallbackBuffer(data)
+        return@setPreviewCallbackWithBuffer
+      }
       dispatcher.offer(
         data = data,
         width = bufferSize.width,
         height = bufferSize.height,
         rotationDegrees = rotationDegrees,
         transformIdentity = transformIdentityProvider(),
-        returnBuffer = { buffer ->
-          if (!_closed && _camera === source) source.addCallbackBuffer(buffer)
-        },
+        returnBuffer = { buffer -> returnCallbackBuffer(source, buffer) },
       )
+    }
+  }
+
+  private fun returnCallbackBuffer(source: Camera, buffer: ByteArray) {
+    if (_closed) return
+    callOnCameraThread {
+      if (!_closed && _camera === source) source.addCallbackBuffer(buffer)
+    }
+  }
+
+  private fun acquireCameraSessionPermit(generation: Long): Boolean {
+    while (isCurrentStartRequest(generation)) {
+      try {
+        if (CAMERA_SESSION_PERMIT.tryAcquire(CAMERA_SESSION_PERMIT_POLL_MILLIS, TimeUnit.MILLISECONDS)) {
+          _hasCameraSessionPermit = true
+          return true
+        }
+      } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        return false
+      }
+    }
+    return false
+  }
+
+  private fun isCurrentStartRequest(generation: Long): Boolean {
+    return !_closed && _shouldRun && _requestGeneration == generation
+  }
+
+  private fun failAndCloseFromCameraThread(error: Throwable, generation: Long) {
+    _mainHandler.post {
+      if (!isCurrentStartRequest(generation)) return@post
+      onError(error)
+      close()
     }
   }
 
@@ -207,7 +319,8 @@ internal class CameraPreviewController(
   }
 
   private fun stopCamera() {
-    val camera = _camera ?: return
+    checkCameraOperationThread()
+    val camera = _camera
     val sessionIdentity = _sessionIdentity
     _periodicAutoFocus?.close()
     _periodicAutoFocus = null
@@ -215,33 +328,81 @@ internal class CameraPreviewController(
     _sessionIdentity = null
     _frameDispatcher?.discardPending()
     runCameraCleanupActions(
-      actions = listOf(
-        { camera.setPreviewCallbackWithBuffer(null) },
-        { camera.setErrorCallback(null) },
-        { camera.stopPreview() },
-        { camera.release() },
-        { onSessionClosed(sessionIdentity) },
-      ),
-      finalAction = {},
+      actions = buildList {
+        if (camera != null) {
+          add { camera.setPreviewCallbackWithBuffer(null) }
+          add { camera.setErrorCallback(null) }
+          add { camera.stopPreview() }
+          add { camera.release() }
+        }
+        if (sessionIdentity != null) add { callOnMainThread { onSessionClosed(sessionIdentity) } }
+      },
+      finalAction = ::releaseCameraSessionPermit,
     )?.also(onError)
+  }
+
+  private fun releaseCameraSessionPermit() {
+    if (!_hasCameraSessionPermit) return
+    _hasCameraSessionPermit = false
+    CAMERA_SESSION_PERMIT.release()
+  }
+
+  private fun <T> callOnMainThread(action: () -> T): T {
+    return callOnHandlerThread(_mainHandler, action)
+  }
+
+  private fun <T> callOnCameraThread(action: () -> T): T {
+    return callOnHandlerThread(_cameraHandler, action)
+  }
+
+  private fun checkCameraOperationThread() {
+    check(Looper.myLooper() === _cameraHandler.looper) {
+      "Camera operations must run on $CAMERA_OPERATION_THREAD_NAME."
+    }
   }
 
   override fun close() {
     if (_closed) return
     _closed = true
+    _shouldRun = false
+    _requestGeneration++
     lifecycleOwner.lifecycle.removeObserver(_lifecycleObserver)
     if (textureView.surfaceTextureListener === _surfaceTextureListener) {
       textureView.surfaceTextureListener = null
     }
-    stopCamera()
-    _frameDispatcher?.close()
+    _cameraHandler.post {
+      try {
+        stopCamera()
+        _frameDispatcher?.close()
+      } finally {
+        _cameraThread.quitSafely()
+      }
+    }
   }
 }
 
+internal const val CAMERA_OPERATION_THREAD_NAME = "CameraPreview-Camera"
 internal const val CAMERA_ANALYSIS_THREAD_NAME = "CameraPreview-Analysis"
 private const val CAMERA_CALLBACK_BUFFER_COUNT = 3
 private const val MAX_PREVIEW_PIXELS = 1280 * 960
 private const val AUTO_FOCUS_INTERVAL_MILLIS = 1_000L
+private const val CAMERA_SESSION_PERMIT_POLL_MILLIS = 100L
+// 避免重建时新会话在旧会话异步释放前打开相机
+private val CAMERA_SESSION_PERMIT = Semaphore(1, true)
+
+private fun <T> callOnHandlerThread(handler: Handler, action: () -> T): T {
+  if (Looper.myLooper() === handler.looper) return action()
+  val task = FutureTask(action)
+  check(handler.post(task)) { "The target handler thread is not available." }
+  return try {
+    task.get()
+  } catch (error: ExecutionException) {
+    throw error.cause ?: error
+  } catch (error: InterruptedException) {
+    Thread.currentThread().interrupt()
+    throw error
+  }
+}
 
 /** 在不支持连续对焦时定期触发单次自动对焦 */
 internal class PeriodicAutoFocus(

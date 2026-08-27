@@ -86,9 +86,10 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
-  fun withoutFrameCallback_startsPreviewWithoutAnalysisThread() {
+  fun withoutFrameCallback_usesCameraThreadWithoutAnalysisThread() {
     assumeCameraAvailable()
-    val initialAnalysisThreadCount = activeAnalysisThreadCount()
+    val initialCameraThreads = activeCameraThreads()
+    val initialAnalysisThreads = activeAnalysisThreads()
     val state = CameraPreviewState()
     val error = AtomicReference<Throwable?>()
 
@@ -104,7 +105,8 @@ class CameraPreviewIntegrationTest {
 
     assertThat(error.get()).isNull()
     assertThat(state.previewResolution.value).isNotEqualTo(IntSize.Zero)
-    assertThat(activeAnalysisThreadCount()).isAtMost(initialAnalysisThreadCount)
+    assertThat(activeCameraThreads() - initialCameraThreads).isNotEmpty()
+    assertThat(activeAnalysisThreads() - initialAnalysisThreads).isEmpty()
   }
 
   @Test
@@ -261,9 +263,42 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
-  fun destroyedLifecycleOwner_releasesSessionAndAnalysisThread() {
+  fun rapidLifecycleRestart_reopensSessionWithoutError() {
     assumeCameraAvailable()
-    val initialAnalysisThreadCount = activeAnalysisThreadCount()
+    val lifecycleOwner = FakeLifecycleOwner()
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+    _composeRule.runOnUiThread { lifecycleOwner.start() }
+
+    _composeRule.setContent {
+      CompositionLocalProvider(LocalLifecycleOwner provides lifecycleOwner) {
+        CameraPreview(
+          modifier = Modifier.size(240.dp),
+          state = state,
+          onError = error::set,
+        )
+      }
+    }
+    waitForPreview(state, error)
+    val initialSessionIdentity = checkNotNull(state.currentSessionIdentity())
+
+    _composeRule.runOnUiThread {
+      lifecycleOwner.stop()
+      lifecycleOwner.start()
+    }
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      error.get() != null || state.currentSessionIdentity()?.let { it !== initialSessionIdentity } == true
+    }
+
+    assertThat(error.get()).isNull()
+    assertThat(state.previewResolution.value).isNotEqualTo(IntSize.Zero)
+  }
+
+  @Test
+  fun destroyedLifecycleOwner_releasesSessionAndWorkerThreads() {
+    assumeCameraAvailable()
+    val initialCameraThreads = activeCameraThreads()
+    val initialAnalysisThreads = activeAnalysisThreads()
     val lifecycleOwner = FakeLifecycleOwner()
     val state = CameraPreviewState()
     val error = AtomicReference<Throwable?>()
@@ -284,7 +319,9 @@ class CameraPreviewIntegrationTest {
     assertThat(frameReceived.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
     _composeRule.runOnUiThread { lifecycleOwner.destroy() }
     _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
-      state.previewResolution.value == IntSize.Zero && activeAnalysisThreadCount() <= initialAnalysisThreadCount
+      state.previewResolution.value == IntSize.Zero &&
+        (activeCameraThreads() - initialCameraThreads).isEmpty() &&
+        (activeAnalysisThreads() - initialAnalysisThreads).isEmpty()
     }
 
     assertThat(error.get()).isNull()
@@ -301,9 +338,17 @@ class CameraPreviewIntegrationTest {
     }
   }
 
-  private fun activeAnalysisThreadCount(): Int {
-    return Thread.getAllStackTraces().keys.count { thread ->
-      thread.isAlive && thread.name == CAMERA_ANALYSIS_THREAD_NAME
+  private fun activeAnalysisThreads(): Set<Thread> {
+    return activeThreads(CAMERA_ANALYSIS_THREAD_NAME)
+  }
+
+  private fun activeCameraThreads(): Set<Thread> {
+    return activeThreads(CAMERA_OPERATION_THREAD_NAME)
+  }
+
+  private fun activeThreads(name: String): Set<Thread> {
+    return Thread.getAllStackTraces().keys.filterTo(linkedSetOf()) { thread ->
+      thread.isAlive && thread.name == name
     }
   }
 
@@ -328,8 +373,14 @@ private class FakeLifecycleOwner : LifecycleOwner {
   override val lifecycle: Lifecycle get() = _registry
 
   fun start() {
-    _registry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+    if (_registry.currentState == Lifecycle.State.INITIALIZED) {
+      _registry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+    }
     _registry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+  }
+
+  fun stop() {
+    _registry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
   }
 
   fun destroy() {
