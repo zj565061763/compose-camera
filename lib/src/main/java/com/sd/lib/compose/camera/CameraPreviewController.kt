@@ -124,14 +124,11 @@ internal class CameraPreviewController(
   }
 
   private fun postStopCamera(surfaceTextureToRelease: SurfaceTexture? = null) {
-    val posted = _cameraHandler.post {
-      try {
-        stopCamera()
-      } finally {
-        surfaceTextureToRelease?.release()
-      }
-    }
-    if (!posted) surfaceTextureToRelease?.release()
+    postStopThenRelease(
+      post = _cameraHandler::post,
+      stop = ::stopCamera,
+      release = { surfaceTextureToRelease?.release() },
+    )
   }
 
   private fun startCameraIfReady(generation: Long, surfaceTexture: SurfaceTexture) {
@@ -389,6 +386,21 @@ private const val AUTO_FOCUS_INTERVAL_MILLIS = 1_000L
 private const val CAMERA_SESSION_PERMIT_POLL_MILLIS = 100L
 // 避免重建时新会话在旧会话异步释放前打开相机
 private val CAMERA_SESSION_PERMIT = Semaphore(1, true)
+
+internal fun postStopThenRelease(
+  post: (Runnable) -> Boolean,
+  stop: () -> Unit,
+  release: () -> Unit,
+) {
+  val task = Runnable {
+    try {
+      stop()
+    } finally {
+      release()
+    }
+  }
+  if (!post(task)) release()
+}
 
 private fun <T> callOnHandlerThread(handler: Handler, action: () -> T): T {
   if (Looper.myLooper() === handler.looper) return action()

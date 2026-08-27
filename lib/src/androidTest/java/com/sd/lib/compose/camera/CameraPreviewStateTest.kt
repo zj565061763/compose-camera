@@ -238,6 +238,42 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun postStopThenRelease_stopsBeforeReleasingSurface() {
+    val calls = mutableListOf<String>()
+
+    postStopThenRelease(
+      post = { task ->
+        task.run()
+        true
+      },
+      stop = { calls += "stop" },
+      release = { calls += "release" },
+    )
+
+    assertThat(calls).containsExactly("stop", "release").inOrder()
+  }
+
+  @Test
+  fun postStopThenRelease_stopFailureStillReleasesSurface() {
+    val failure = IllegalStateException("stop")
+    var released = false
+
+    val thrown = assertThrows(IllegalStateException::class.java) {
+      postStopThenRelease(
+        post = { task ->
+          task.run()
+          true
+        },
+        stop = { throw failure },
+        release = { released = true },
+      )
+    }
+
+    assertThat(thrown).isSameInstanceAs(failure)
+    assertThat(released).isTrue()
+  }
+
+  @Test
   fun reset_clearsRetryGeneration() {
     val state = CameraPreviewState()
     state.retry()

@@ -7,6 +7,7 @@ import android.hardware.Camera
 /** 在首次加载或手动刷新时读取设备列表 */
 internal class CameraDevicesLoader(
   private val state: CameraDevicesState,
+  private val cameraApi: CameraDevicesApi = PlatformCameraDevicesApi,
 ) : AutoCloseable {
   private var _closed = false
 
@@ -14,7 +15,7 @@ internal class CameraDevicesLoader(
     if (_closed) return
     state.beginRefresh()
     val devices = try {
-      List(Camera.getNumberOfCameras()) { cameraId -> cameraDeviceInfo(cameraId) }
+      List(cameraApi.getNumberOfCameras()) { cameraId -> cameraDeviceInfo(cameraApi, cameraId) }
     } catch (error: Exception) {
       state.publishError(error)
       return
@@ -27,16 +28,29 @@ internal class CameraDevicesLoader(
   }
 }
 
-private fun cameraDeviceInfo(cameraId: Int): CameraDeviceInfo {
+internal interface CameraDevicesApi {
+  fun getNumberOfCameras(): Int
+  fun getCameraInfo(cameraId: Int): Camera.CameraInfo
+}
+
+private object PlatformCameraDevicesApi : CameraDevicesApi {
+  override fun getNumberOfCameras(): Int = Camera.getNumberOfCameras()
+
+  override fun getCameraInfo(cameraId: Int): Camera.CameraInfo {
+    return Camera.CameraInfo().also { Camera.getCameraInfo(cameraId, it) }
+  }
+}
+
+private fun cameraDeviceInfo(cameraApi: CameraDevicesApi, cameraId: Int): CameraDeviceInfo {
   return CameraDeviceInfo(
     cameraId = cameraId.toString(),
-    lens = readCameraLens(cameraId),
+    lens = readCameraLens(cameraApi, cameraId),
   )
 }
 
-private fun readCameraLens(cameraId: Int): CameraLens? {
+private fun readCameraLens(cameraApi: CameraDevicesApi, cameraId: Int): CameraLens? {
   return try {
-    val info = Camera.CameraInfo().also { Camera.getCameraInfo(cameraId, it) }
+    val info = cameraApi.getCameraInfo(cameraId)
     when (info.facing) {
       Camera.CameraInfo.CAMERA_FACING_FRONT -> CameraLens.FRONT
       Camera.CameraInfo.CAMERA_FACING_BACK -> CameraLens.BACK

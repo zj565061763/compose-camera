@@ -3,8 +3,10 @@
 package com.sd.lib.compose.camera
 
 import android.Manifest
+import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.view.Surface
+import android.view.TextureView
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
@@ -295,6 +297,50 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
+  fun surfaceDestroyed_transfersReleaseToCameraThread() {
+    val initialCameraThreads = activeCameraThreads()
+    val lifecycleOwner = FakeLifecycleOwner()
+    val releaseCompleted = CountDownLatch(1)
+    val releaseThreadName = AtomicReference<String?>()
+    val receivedError = AtomicReference<Throwable?>()
+    val surfaceTexture = RecordingSurfaceTexture {
+      releaseThreadName.set(Thread.currentThread().name)
+      releaseCompleted.countDown()
+    }
+    lateinit var controller: CameraPreviewController
+
+    _composeRule.runOnUiThread {
+      val textureView = TextureView(_composeRule.activity)
+      controller = CameraPreviewController(
+        lifecycleOwner = lifecycleOwner,
+        textureView = textureView,
+        cameraId = null,
+        displayRotation = Surface.ROTATION_0,
+        previewViewSize = IntSize(240, 240),
+        transformIdentityProvider = { null },
+        onSessionStarted = { _, _, _, _ -> error("Camera session must not start.") },
+        onFrame = null,
+        onError = receivedError::set,
+        onSessionClosed = {},
+      )
+      controller.start()
+      val listener = checkNotNull(textureView.surfaceTextureListener)
+      listener.onSurfaceTextureAvailable(surfaceTexture, 240, 240)
+
+      assertThat(listener.onSurfaceTextureDestroyed(surfaceTexture)).isFalse()
+    }
+
+    assertThat(releaseCompleted.await(CLEANUP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)).isTrue()
+    assertThat(releaseThreadName.get()).isEqualTo(CAMERA_OPERATION_THREAD_NAME)
+    assertThat(receivedError.get()).isNull()
+
+    _composeRule.runOnUiThread { controller.close() }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      (activeCameraThreads() - initialCameraThreads).isEmpty()
+    }
+  }
+
+  @Test
   fun destroyedLifecycleOwner_releasesSessionAndWorkerThreads() {
     assumeCameraAvailable()
     val initialCameraThreads = activeCameraThreads()
@@ -364,6 +410,15 @@ class CameraPreviewIntegrationTest {
   private companion object {
     const val FRAME_TIMEOUT_SECONDS = 15L
     const val CLEANUP_TIMEOUT_MILLIS = 5_000L
+  }
+}
+
+private class RecordingSurfaceTexture(
+  private val onRelease: () -> Unit,
+) : SurfaceTexture(0) {
+  override fun release() {
+    super.release()
+    onRelease()
   }
 }
 
