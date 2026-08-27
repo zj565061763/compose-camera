@@ -5,6 +5,8 @@ package com.sd.lib.compose.camera
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
+import android.os.Handler
+import android.os.Looper
 import android.view.Surface
 import android.view.TextureView
 import androidx.compose.ui.unit.IntSize
@@ -37,8 +39,10 @@ internal class CameraPreviewController(
   private val _frameDispatcher = onFrame?.let { callback ->
     CameraFrameDispatcher(frameFormat, callback, onError)
   }
+  private val _mainHandler = Handler(Looper.getMainLooper())
   @Volatile
   private var _camera: Camera? = null
+  private var _periodicAutoFocus: PeriodicAutoFocus? = null
   private var _sessionIdentity: CameraFrameTransformIdentity? = null
   private var _surfaceAvailable = textureView.isAvailable
   private var _started = false
@@ -121,23 +125,28 @@ internal class CameraPreviewController(
 
   private fun openCamera(resolvedCameraId: Int) {
     val cameraInfo = Camera.CameraInfo().also { Camera.getCameraInfo(resolvedCameraId, it) }
-    val rotationDegrees = calculateCameraDisplayOrientation(cameraInfo, displayRotation)
+    val displayOrientation = calculateCameraDisplayOrientation(cameraInfo, displayRotation)
+    val frameRotationDegrees = calculateCameraFrameRotation(cameraInfo, displayRotation)
     val camera = Camera.open(resolvedCameraId).also { _camera = it }
     val parameters = camera.parameters
     parameters.previewFormat = ImageFormat.NV21
     val previewSize = choosePreviewSize(
       sizes = parameters.supportedPreviewSizes.map { size -> IntSize(size.width, size.height) },
       previewViewSize = previewViewSize,
-      rotationDegrees = rotationDegrees,
+      rotationDegrees = frameRotationDegrees,
     )
     parameters.setPreviewSize(previewSize.width, previewSize.height)
-    chooseFocusMode(parameters.supportedFocusModes)?.also { mode -> parameters.focusMode = mode }
+    val focusMode = chooseFocusMode(parameters.supportedFocusModes)
+    focusMode?.also { mode -> parameters.focusMode = mode }
     camera.parameters = parameters
 
-    val configuredSize = camera.parameters.previewSize
+    val configuredParameters = camera.parameters
+    if (_frameDispatcher != null) checkNv21PreviewFormat(configuredParameters.previewFormat)
+    val configuredSize = configuredParameters.previewSize
+    val configuredFocusMode = configuredParameters.focusMode
     val bufferSize = IntSize(configuredSize.width, configuredSize.height)
     val surfaceTexture = checkNotNull(textureView.surfaceTexture) { "TextureView surface is not available." }
-    camera.setDisplayOrientation(rotationDegrees)
+    camera.setDisplayOrientation(displayOrientation)
     camera.setPreviewTexture(surfaceTexture)
     camera.setErrorCallback { errorCode, source ->
       if (!_closed && _camera === source) {
@@ -150,11 +159,25 @@ internal class CameraPreviewController(
     onSessionStarted(
       sessionIdentity,
       bufferSize,
-      rotationDegrees,
+      frameRotationDegrees,
       cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT,
     )
-    configureFrameCallback(camera, bufferSize, rotationDegrees)
+    configureFrameCallback(camera, bufferSize, frameRotationDegrees)
     camera.startPreview()
+    if (configuredFocusMode == Camera.Parameters.FOCUS_MODE_AUTO) startPeriodicAutoFocus(camera)
+  }
+
+  private fun startPeriodicAutoFocus(camera: Camera) {
+    _periodicAutoFocus = PeriodicAutoFocus(
+      handler = _mainHandler,
+      focus = {
+        if (!_closed && _camera === camera) {
+          camera.cancelAutoFocus()
+          camera.autoFocus(null)
+        }
+      },
+      onError = onError,
+    ).also { it.start() }
   }
 
   private fun configureFrameCallback(camera: Camera, bufferSize: IntSize, rotationDegrees: Int) {
@@ -187,6 +210,8 @@ internal class CameraPreviewController(
   private fun stopCamera() {
     val camera = _camera ?: return
     val sessionIdentity = _sessionIdentity
+    _periodicAutoFocus?.close()
+    _periodicAutoFocus = null
     _camera = null
     _sessionIdentity = null
     _frameDispatcher?.discardPending()
@@ -217,6 +242,41 @@ internal class CameraPreviewController(
 internal const val CAMERA_ANALYSIS_THREAD_NAME = "CameraPreview-Analysis"
 private const val CAMERA_CALLBACK_BUFFER_COUNT = 3
 private const val MAX_PREVIEW_PIXELS = 1280 * 960
+private const val AUTO_FOCUS_INTERVAL_MILLIS = 1_000L
+
+/** 在不支持连续对焦时定期触发单次自动对焦 */
+internal class PeriodicAutoFocus(
+  private val handler: Handler,
+  private val intervalMillis: Long = AUTO_FOCUS_INTERVAL_MILLIS,
+  private val focus: () -> Unit,
+  private val onError: (Throwable) -> Unit,
+) : AutoCloseable {
+  private var _started = false
+  private var _closed = false
+  private val _task = object : Runnable {
+    override fun run() {
+      if (_closed) return
+      try {
+        focus()
+      } catch (error: Exception) {
+        onError(error)
+      }
+      if (!_closed) handler.postDelayed(this, intervalMillis)
+    }
+  }
+
+  fun start() {
+    if (_started || _closed) return
+    _started = true
+    handler.post(_task)
+  }
+
+  override fun close() {
+    if (_closed) return
+    _closed = true
+    handler.removeCallbacks(_task)
+  }
+}
 
 /** 执行全部普通清理；即使发生异常，也始终执行最后的资源释放。 */
 internal fun runCameraCleanupActions(
@@ -246,7 +306,7 @@ internal fun runCameraCleanupActions(
   return firstFailure
 }
 
-/** 单线程处理最新帧，并在处理完成或被替换时归还相机回调缓冲区。 */
+/** 单线程处理相机输出的 NV21 最新帧，并按目标格式发布和归还回调缓冲区。 */
 internal class CameraFrameDispatcher(
   private val frameFormat: CameraFrameFormat,
   private val onFrame: (CameraFrame) -> Unit,
@@ -268,7 +328,7 @@ internal class CameraFrameDispatcher(
     transformIdentity: CameraFrameTransformIdentity?,
     returnBuffer: (ByteArray) -> Unit,
   ) {
-    if (!isValidFrameData(data, width, height)) {
+    if (!isValidNv21Data(data, width, height)) {
       reportOrThrow(releaseFrameBuffer(data, returnBuffer))
       return
     }
@@ -384,9 +444,15 @@ private fun releaseFrameBuffer(
   }
 }
 
-private fun isValidFrameData(data: ByteArray, width: Int, height: Int): Boolean {
+private fun isValidNv21Data(data: ByteArray, width: Int, height: Int): Boolean {
   val requiredSize = nv21BufferSize(width, height) ?: return false
   return data.size >= requiredSize
+}
+
+internal fun checkNv21PreviewFormat(previewFormat: Int) {
+  check(previewFormat == ImageFormat.NV21) {
+    "The camera applied preview format $previewFormat instead of NV21."
+  }
 }
 
 internal fun nv21BufferSize(width: Int, height: Int): Int? {
@@ -430,13 +496,7 @@ internal fun choosePreviewSize(
 }
 
 internal fun calculateCameraDisplayOrientation(cameraInfo: Camera.CameraInfo, displayRotation: Int): Int {
-  val displayDegrees = when (displayRotation) {
-    Surface.ROTATION_0 -> 0
-    Surface.ROTATION_90 -> 90
-    Surface.ROTATION_180 -> 180
-    Surface.ROTATION_270 -> 270
-    else -> 0
-  }
+  val displayDegrees = displayRotationDegrees(displayRotation)
   return if (cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
     val result = (cameraInfo.orientation + displayDegrees) % 360
     (360 - result) % 360
@@ -445,7 +505,26 @@ internal fun calculateCameraDisplayOrientation(cameraInfo: Camera.CameraInfo, di
   }
 }
 
-private fun chooseFocusMode(supportedModes: List<String>?): String? {
+internal fun calculateCameraFrameRotation(cameraInfo: Camera.CameraInfo, displayRotation: Int): Int {
+  val displayDegrees = displayRotationDegrees(displayRotation)
+  return if (cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
+    (cameraInfo.orientation + displayDegrees) % 360
+  } else {
+    (cameraInfo.orientation - displayDegrees + 360) % 360
+  }
+}
+
+private fun displayRotationDegrees(displayRotation: Int): Int {
+  return when (displayRotation) {
+    Surface.ROTATION_0 -> 0
+    Surface.ROTATION_90 -> 90
+    Surface.ROTATION_180 -> 180
+    Surface.ROTATION_270 -> 270
+    else -> 0
+  }
+}
+
+internal fun chooseFocusMode(supportedModes: List<String>?): String? {
   return when {
     supportedModes == null -> null
     Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE in supportedModes -> {

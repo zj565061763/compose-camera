@@ -109,8 +109,9 @@ git diff --check
 
 ## 预览与帧坐标转换
 
-- 使用设备设置后实际返回的 preview size 发布 `previewResolution`，它表示原始帧缓冲区尺寸，不是 Compose 布局尺寸。
+- 参数设置后必须读取设备实际采用的 preview format 和 preview size；启用帧回调时格式必须是 NV21，实际尺寸用于发布 `previewResolution`，它表示原始帧缓冲区尺寸而不是 Compose 布局尺寸。
 - `TextureView` 必须按旋转后的缓冲区比例和 `ContentScale` 布局，禁止直接拉伸到 Compose 区域。
+- 前置摄像头的平台预览显示方向和原始帧旋转角度必须分别计算，禁止把镜像补偿后的显示方向用于帧数据或坐标变换。
 - 平台默认镜像前置预览；额外 `graphicsLayer` 镜像只用于达到 `CameraMirrorMode` 指定的目标状态。
 - `CameraPreviewState` 以不可变快照和 `AtomicReference` 跨线程发布变换，分析线程无锁读取。
 - 变换链为 `raw frame -> display rotation -> ContentScale -> target mirror`。
@@ -120,6 +121,7 @@ git diff --check
 ## 线程、错误与清理
 
 - `onFrame` 在名为 `CameraPreview-Analysis` 的专用线程同步执行，只保留正在处理的帧和最新待处理帧。
+- 优先使用连续对焦模式；只支持 `FOCUS_MODE_AUTO` 时，每秒重新触发一次对焦，并在会话停止时取消任务。
 - 每个相机回调缓冲区都必须在 `finally` 中归还。释放会丢弃尚未开始的帧，但不能中断已经开始的回调。
 - NV21 缓冲区必须在创建 `CameraFrame` 前验证正偶数宽高、整数溢出和最小数据长度。
 - `onError` 在主线程收到设备枚举、选择、打开、配置、运行、帧回调和普通清理异常。已开始帧的异常可能晚于组件离开组合。
@@ -129,8 +131,8 @@ git diff --check
 
 ## 测试布局与改动映射
 
-- `CameraPreviewStateTest.kt` 覆盖矩阵、镜像、旋转、transform identity、预览尺寸选择、帧格式、帧缓冲区、错误聚合和异常安全清理。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21 帧、Bitmap 转换、旋转和分析线程。
+- `CameraPreviewStateTest.kt` 覆盖矩阵、前后摄像头旋转、镜像、transform identity、预览尺寸选择、对焦调度、帧格式、帧缓冲区、错误聚合和异常安全清理。
+- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、JPEG、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和分析线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - `app/src/main/java/.../SampleActivity.kt` 是权限、设备切换、镜像切换和手动真机验证入口。
 - 纯计算逻辑优先放入 JVM 测试；依赖 Android 图形类型、Lifecycle、权限或 Compose 集成的行为放入仪器测试。

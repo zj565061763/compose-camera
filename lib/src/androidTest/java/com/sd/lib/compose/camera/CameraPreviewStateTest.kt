@@ -1,14 +1,22 @@
+@file:Suppress("DEPRECATION")
+
 package com.sd.lib.compose.camera
 
 import android.graphics.ImageFormat
 import android.graphics.RectF
+import android.hardware.Camera
+import android.os.Handler
+import android.os.Looper
+import android.view.Surface
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntSize
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -106,6 +114,140 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun cameraRotations_frontCameraSeparatesDisplayAndFrameRotation() {
+    val cameraInfo = cameraInfo(Camera.CameraInfo.CAMERA_FACING_FRONT, orientation = 90)
+    val displayRotations = listOf(
+      Surface.ROTATION_0,
+      Surface.ROTATION_90,
+      Surface.ROTATION_180,
+      Surface.ROTATION_270,
+    )
+
+    assertThat(displayRotations.map { calculateCameraDisplayOrientation(cameraInfo, it) })
+      .containsExactly(270, 180, 90, 0).inOrder()
+    assertThat(displayRotations.map { calculateCameraFrameRotation(cameraInfo, it) })
+      .containsExactly(90, 180, 270, 0).inOrder()
+  }
+
+  @Test
+  fun cameraRotations_backCameraUsesSameDisplayAndFrameRotation() {
+    val cameraInfo = cameraInfo(Camera.CameraInfo.CAMERA_FACING_BACK, orientation = 90)
+    val displayRotations = listOf(
+      Surface.ROTATION_0,
+      Surface.ROTATION_90,
+      Surface.ROTATION_180,
+      Surface.ROTATION_270,
+    )
+    val expected = listOf(90, 0, 270, 180)
+
+    assertThat(displayRotations.map { calculateCameraDisplayOrientation(cameraInfo, it) }).isEqualTo(expected)
+    assertThat(displayRotations.map { calculateCameraFrameRotation(cameraInfo, it) }).isEqualTo(expected)
+  }
+
+  @Test
+  fun periodicAutoFocus_repeatsAfterOrdinaryFailure() {
+    val attempts = AtomicInteger()
+    val errorReceived = CountDownLatch(1)
+    val focusSucceeded = CountDownLatch(1)
+    val error = AtomicReference<Throwable?>()
+    val firstFailure = IllegalStateException("focus")
+    val periodicAutoFocus = PeriodicAutoFocus(
+      handler = Handler(Looper.getMainLooper()),
+      intervalMillis = 10,
+      focus = {
+        if (attempts.incrementAndGet() == 1) throw firstFailure
+        focusSucceeded.countDown()
+      },
+      onError = { failure ->
+        error.set(failure)
+        errorReceived.countDown()
+      },
+    )
+
+    periodicAutoFocus.start()
+
+    assertThat(errorReceived.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(focusSucceeded.await(5, TimeUnit.SECONDS)).isTrue()
+    periodicAutoFocus.close()
+    assertThat(error.get()).isSameInstanceAs(firstFailure)
+    assertThat(attempts.get()).isAtLeast(2)
+  }
+
+  @Test
+  fun periodicAutoFocus_closeDuringFocusDoesNotScheduleAgain() {
+    val attempts = AtomicInteger()
+    val focused = CountDownLatch(1)
+    lateinit var periodicAutoFocus: PeriodicAutoFocus
+    periodicAutoFocus = PeriodicAutoFocus(
+      handler = Handler(Looper.getMainLooper()),
+      intervalMillis = 10,
+      focus = {
+        attempts.incrementAndGet()
+        periodicAutoFocus.close()
+        focused.countDown()
+      },
+      onError = {},
+    )
+
+    periodicAutoFocus.start()
+
+    assertThat(focused.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(attempts.get()).isEqualTo(1)
+  }
+
+  @Test
+  fun chooseFocusMode_prefersContinuousModeAndFallsBackToAuto() {
+    assertThat(
+      chooseFocusMode(
+        listOf(
+          Camera.Parameters.FOCUS_MODE_AUTO,
+          Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO,
+          Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE,
+        ),
+      ),
+    ).isEqualTo(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE)
+    assertThat(chooseFocusMode(listOf(Camera.Parameters.FOCUS_MODE_AUTO)))
+      .isEqualTo(Camera.Parameters.FOCUS_MODE_AUTO)
+    assertThat(chooseFocusMode(listOf(Camera.Parameters.FOCUS_MODE_FIXED))).isNull()
+  }
+
+  @Test
+  fun cleanupActions_runAllActionsAndAggregateFailures() {
+    val calls = mutableListOf<Int>()
+    val firstFailure = IllegalStateException("first")
+    val secondFailure = IllegalArgumentException("second")
+
+    val failure = runCameraCleanupActions(
+      actions = listOf(
+        {
+          calls += 1
+          throw firstFailure
+        },
+        { calls += 2 },
+        {
+          calls += 3
+          throw secondFailure
+        },
+      ),
+      finalAction = { calls += 4 },
+    )
+
+    assertThat(calls).containsExactly(1, 2, 3, 4).inOrder()
+    assertThat(failure).isSameInstanceAs(firstFailure)
+    assertThat(firstFailure.suppressed.asList()).containsExactly(secondFailure)
+  }
+
+  @Test
+  fun reset_clearsRetryGeneration() {
+    val state = CameraPreviewState()
+    state.retry()
+
+    state.reset()
+
+    assertThat(state.retryGeneration).isEqualTo(0)
+  }
+
+  @Test
   fun cameraFrame_toBitmapCopiesNv21Pixels() {
     val width = 4
     val height = 4
@@ -122,6 +264,7 @@ class CameraPreviewStateTest {
     val firstStarted = CountDownLatch(1)
     val releaseFirst = CountDownLatch(1)
     val callbacks = CountDownLatch(2)
+    val buffersReturned = CountDownLatch(3)
     val seen = mutableListOf<Int>()
     val returned = mutableListOf<Int>()
     val error = AtomicReference<Throwable?>()
@@ -138,13 +281,14 @@ class CameraPreviewStateTest {
       onError = error::set,
     )
 
-    dispatcher.offerFrame(1, returned)
+    dispatcher.offerFrame(1, returned, buffersReturned)
     assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
-    dispatcher.offerFrame(2, returned)
-    dispatcher.offerFrame(3, returned)
+    dispatcher.offerFrame(2, returned, buffersReturned)
+    dispatcher.offerFrame(3, returned, buffersReturned)
     releaseFirst.countDown()
 
     assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
     dispatcher.close()
     assertThat(error.get()).isNull()
     assertThat(seen).containsExactly(1, 3).inOrder()
@@ -173,6 +317,42 @@ class CameraPreviewStateTest {
     assertThat(returned.await(1, TimeUnit.SECONDS)).isTrue()
     assertThat(callback.await(100, TimeUnit.MILLISECONDS)).isFalse()
     dispatcher.close()
+  }
+
+  @Test
+  fun frameDispatcher_jpegRejectsInvalidNv21Source() {
+    val callback = CountDownLatch(1)
+    val returned = CountDownLatch(1)
+    val dispatcher = CameraFrameDispatcher(
+      frameFormat = CameraFrameFormat.JPEG,
+      onFrame = { callback.countDown() },
+      onError = {},
+    )
+
+    dispatcher.offer(
+      data = ByteArray(1),
+      width = 640,
+      height = 480,
+      rotationDegrees = 0,
+      transformIdentity = CameraFrameTransformIdentity(),
+      returnBuffer = { returned.countDown() },
+    )
+
+    assertThat(returned.await(1, TimeUnit.SECONDS)).isTrue()
+    assertThat(callback.await(100, TimeUnit.MILLISECONDS)).isFalse()
+    dispatcher.close()
+  }
+
+  @Test
+  fun checkNv21PreviewFormat_rejectsDifferentConfiguredFormat() {
+    checkNv21PreviewFormat(ImageFormat.NV21)
+
+    val error = assertThrows(IllegalStateException::class.java) {
+      checkNv21PreviewFormat(ImageFormat.YV12)
+    }
+
+    assertThat(error).hasMessageThat().contains(ImageFormat.YV12.toString())
+    assertThat(error).hasMessageThat().contains("NV21")
   }
 
   @Test
@@ -247,15 +427,29 @@ class CameraPreviewStateTest {
   }
 }
 
-private fun CameraFrameDispatcher.offerFrame(value: Int, returned: MutableList<Int>) {
+private fun CameraFrameDispatcher.offerFrame(
+  value: Int,
+  returned: MutableList<Int>,
+  buffersReturned: CountDownLatch,
+) {
   offer(
     data = ByteArray(6).also { it[0] = value.toByte() },
     width = 2,
     height = 2,
     rotationDegrees = 0,
     transformIdentity = CameraFrameTransformIdentity(),
-    returnBuffer = { buffer -> synchronized(returned) { returned += buffer[0].toInt() } },
+    returnBuffer = { buffer ->
+      synchronized(returned) { returned += buffer[0].toInt() }
+      buffersReturned.countDown()
+    },
   )
+}
+
+private fun cameraInfo(facing: Int, orientation: Int): Camera.CameraInfo {
+  return Camera.CameraInfo().also {
+    it.facing = facing
+    it.orientation = orientation
+  }
 }
 
 private fun frame(

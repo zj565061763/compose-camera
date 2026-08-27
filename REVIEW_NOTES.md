@@ -46,9 +46,11 @@
 ## 预览尺寸、旋转与镜像
 
 - Controller 从设备支持的预览尺寸中选择旋转后最接近 Compose 区域比例的尺寸，并优先限制在 `1280 × 960` 像素以内；若设备没有符合上限的尺寸，则从全部尺寸中选择。
-- 设置参数后必须重新读取设备实际采用的 preview size，并以该尺寸发布 `previewResolution` 和创建回调缓冲区。
+- 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用帧回调且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
 - `TextureView` 按旋转后的原始帧比例和 `ContentScale` 计算内容尺寸，避免把相机缓冲区直接拉伸到 Compose 区域。
+- 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
 - 平台默认镜像前置预览。额外 `graphicsLayer` 水平翻转只用于补偿平台默认状态与 `CameraMirrorMode` 目标状态的差异。
+- 优先使用连续对焦模式；设备只支持 `FOCUS_MODE_AUTO` 时，预览启动后立即对焦并每秒重新触发一次，会话停止时取消定时任务。
 - `CameraPreviewState` 以不可变快照和 `AtomicReference` 跨线程发布变换，分析线程无锁读取。
 - 变换链为 `raw frame -> display rotation -> ContentScale -> target mirror`。
 - 新相机会话、有效布局尺寸、`contentScale` 或目标镜像变化必须使旧 transform token 失效。
@@ -76,8 +78,8 @@
 
 ## 测试与验证
 
-- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、旋转、镜像、token 失效、尺寸选择、NV21 校验、JPEG 转换、最新帧分发和异常安全归还。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖默认 NV21 帧、Bitmap 转换、旋转值和分析线程。
+- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、token 失效、尺寸选择、对焦调度、NV21 校验、JPEG 转换、最新帧分发和异常安全清理。
+- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、JPEG、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和分析线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - 异步测试使用有超时的等待，禁止固定 `sleep`；优先使用轻量 Fake、Google Truth 和显式 `AndroidJUnit4`。
 - 真实相机测试按设备能力跳过没有相机的场景。

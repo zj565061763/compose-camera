@@ -50,6 +50,11 @@ class CameraPreviewState internal constructor() {
     return _transformConfig.get().transformIdentity
   }
 
+  @AnyThread
+  internal fun currentSessionIdentity(): CameraFrameTransformIdentity? {
+    return _transformConfig.get().sessionIdentity
+  }
+
   /**
    * 把 [CameraFrame] 的原始缓冲区坐标映射到 Compose 预览区域。
    * 矩阵包含显示旋转、[ContentScale] 和目标镜像状态。
