@@ -27,7 +27,7 @@ class CameraPreviewStateTest {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(200, 200), ContentScale.Crop, isMirrored = false)
-    state.startSession(identity, IntSize(640, 480), rotationDegrees = 0)
+    state.startSession(identity, IntSize(640, 480), rotationDegrees = 0, isMirrored = false)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 640, 480, 0)))
     val center = floatArrayOf(320f, 240f).also(matrix::mapPoints)
@@ -45,7 +45,7 @@ class CameraPreviewStateTest {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(225, 300), ContentScale.FillBounds, isMirrored = false)
-    state.startSession(identity, IntSize(640, 480), rotationDegrees = 90)
+    state.startSession(identity, IntSize(640, 480), rotationDegrees = 90, isMirrored = false)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 640, 480, 90)))
     val points = floatArrayOf(
@@ -67,7 +67,7 @@ class CameraPreviewStateTest {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(200, 100), ContentScale.FillBounds, isMirrored = true)
-    state.startSession(identity, IntSize(200, 100), rotationDegrees = 0)
+    state.startSession(identity, IntSize(200, 100), rotationDegrees = 0, isMirrored = true)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 200, 100, 0)))
     val points = floatArrayOf(0f, 0f, 200f, 100f).also(matrix::mapPoints)
@@ -80,7 +80,7 @@ class CameraPreviewStateTest {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(3, 3), ContentScale.Crop, isMirrored = true)
-    state.startSession(identity, IntSize(4, 2), rotationDegrees = 0)
+    state.startSession(identity, IntSize(4, 2), rotationDegrees = 0, isMirrored = true)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 4, 2, 0)))
     val points = floatArrayOf(0f, 0f, 4f, 2f).also(matrix::mapPoints)
@@ -93,13 +93,26 @@ class CameraPreviewStateTest {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(200, 100), ContentScale.Fit, isMirrored = false)
-    state.startSession(identity, IntSize(200, 100), rotationDegrees = 0)
+    state.startSession(identity, IntSize(200, 100), rotationDegrees = 0, isMirrored = false)
     val oldFrame = frame(identity, 200, 100, 0)
     assertThat(state.isFrameTransformCurrent(oldFrame.transformToken)).isTrue()
 
     state.updatePreviewLayout(IntSize(100, 200), ContentScale.Fit, isMirrored = false)
 
     assertThat(state.isFrameTransformCurrent(oldFrame.transformToken)).isFalse()
+  }
+
+  @Test
+  fun startSession_overridesStaleMirrorState() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(200, 100), ContentScale.FillBounds, isMirrored = false)
+
+    state.startSession(identity, IntSize(200, 100), rotationDegrees = 0, isMirrored = true)
+
+    val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 200, 100, 0)))
+    val points = floatArrayOf(0f, 0f, 200f, 100f).also(matrix::mapPoints)
+    assertThat(points.asList()).containsExactly(200f, 0f, 0f, 100f).inOrder()
   }
 
   @Test

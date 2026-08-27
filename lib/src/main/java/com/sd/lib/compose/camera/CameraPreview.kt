@@ -65,6 +65,7 @@ fun CameraPreview(
 
   val currentOnFrame by rememberUpdatedState(onFrame)
   val currentOnError by rememberUpdatedState(onError)
+  val currentMirrorMode by rememberUpdatedState(mirrorMode)
   val errorDispatcher = remember { MainThreadErrorDispatcher { error -> currentOnError(error) } }
   val hasFrameCallback = onFrame != null
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
@@ -127,7 +128,12 @@ fun CameraPreview(
         transformIdentityProvider = state::currentTransformIdentity,
         onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
           activePreviewMirrored = isPreviewMirrored
-          state.startSession(sessionIdentity, bufferSize, rotationDegrees)
+          state.startSession(
+            sessionIdentity = sessionIdentity,
+            bufferSize = bufferSize,
+            rotationDegrees = rotationDegrees,
+            isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
+          )
         },
         onFrame = if (hasFrameCallback) {
           { frame -> currentOnFrame?.invoke(frame) }

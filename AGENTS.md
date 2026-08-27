@@ -134,6 +134,7 @@ git diff --check
 ## 测试布局与改动映射
 
 - `CameraPreviewStateTest.kt` 覆盖矩阵、前后摄像头旋转、镜像、transform identity、预览尺寸选择、对焦调度、NV21、帧缓冲区、错误聚合和异常安全清理。
+- `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和工作线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - `app/src/main/java/.../SampleActivity.kt` 是权限、设备切换、镜像切换和手动真机验证入口。

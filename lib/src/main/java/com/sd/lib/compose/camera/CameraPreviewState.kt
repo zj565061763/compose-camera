@@ -124,6 +124,7 @@ class CameraPreviewState internal constructor() {
     sessionIdentity: CameraFrameTransformIdentity,
     bufferSize: IntSize,
     rotationDegrees: Int,
+    isMirrored: Boolean,
   ) {
     val current = _transformConfig.get()
     val normalizedRotation = normalizeRotation(rotationDegrees)
@@ -133,6 +134,7 @@ class CameraPreviewState internal constructor() {
         transformIdentity = sessionIdentity,
         bufferSize = bufferSize,
         rotationDegrees = normalizedRotation,
+        isMirrored = isMirrored,
         geometry = calculatePreviewGeometry(
           bufferSize = bufferSize,
           rotationDegrees = normalizedRotation,
