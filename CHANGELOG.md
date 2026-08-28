@@ -4,14 +4,15 @@
 
 ### ✨ Features
 
-- 帧数据通过 `CameraFrame.data` 以 NV21 格式暴露。
+- 新增 `FrameProcessor`，支持直接接收 NV21 帧或按间隔截取预览区域。
 - 新增可覆盖的 `displayRotation`，默认自动监听当前显示器旋转。
 
 ### ♻️ Changes
 
 - 重构相机会话、设备枚举、预览渲染和帧分发，移除 CameraX 依赖。
 - `cameraId` 保持为不透明的 `String`，`CameraFrame` 不再暴露 `ImageProxy`。
-- `CameraFrame.toBitmap()` 转换失败时返回 `null`。
+- `CameraFrame` 调整为 `Preview` 和 `PreviewSampled` 两种帧类型，移除 `CameraPreview.onFrame`。
+- `CameraFrame.Preview.toBitmap()` 转换失败时返回 `null`。
 - 移除当前相机后端无法识别的 `CameraLens.EXTERNAL`。
 
 ### 🐛 Bug Fixes

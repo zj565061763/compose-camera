@@ -8,6 +8,7 @@ import android.hardware.Camera
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Surface
 import android.view.TextureView
 import androidx.compose.ui.unit.IntSize
@@ -36,14 +37,27 @@ internal class CameraPreviewController(
     Int,
     Boolean,
   ) -> Unit,
-  private val onFrame: ((CameraFrame) -> Unit)?,
+  frameProcessor: ActiveFrameProcessor,
+  private val captureSampledFrame: (
+    CameraFrameTransformIdentity,
+    Boolean,
+  ) -> CameraFrame.PreviewSampled?,
   private val onError: (Throwable) -> Unit,
   private val onSessionClosed: (CameraFrameTransformIdentity?) -> Unit,
 ) : AutoCloseable {
-  private val _frameDispatcher = onFrame?.let { callback ->
-    CameraFrameDispatcher(callback, onError)
-  }
   private val _mainHandler = Handler(Looper.getMainLooper())
+  private val _previewFrameDispatcher = (frameProcessor as? ActiveFrameProcessor.Preview)?.let { processor ->
+    CameraFrameDispatcher(processor.onFrame, onError)
+  }
+  private val _sampledFrameDispatcher = (frameProcessor as? ActiveFrameProcessor.PreviewSampled)?.let { processor ->
+    PreviewSampledFrameDispatcher(
+      mainHandler = _mainHandler,
+      intervalMillis = processor.intervalMillis,
+      captureFrame = captureSampledFrame,
+      onFrame = processor.onFrame,
+      onError = onError,
+    )
+  }
   private val _cameraThread = HandlerThread(CAMERA_OPERATION_THREAD_NAME).also { it.start() }
   private val _cameraHandler = Handler(_cameraThread.looper)
   private var _camera: Camera? = null
@@ -194,7 +208,9 @@ internal class CameraPreviewController(
     camera.parameters = parameters
 
     val configuredParameters = camera.parameters
-    if (_frameDispatcher != null) checkNv21PreviewFormat(configuredParameters.previewFormat)
+    if (_previewFrameDispatcher != null || _sampledFrameDispatcher != null) {
+      checkNv21PreviewFormat(configuredParameters.previewFormat)
+    }
     val configuredSize = configuredParameters.previewSize
     val configuredFocusMode = configuredParameters.focusMode
     val bufferSize = IntSize(configuredSize.width, configuredSize.height)
@@ -225,11 +241,19 @@ internal class CameraPreviewController(
       stopCamera()
       return
     }
-    configureFrameCallback(camera, bufferSize, frameRotationDegrees, generation)
+    configureFrameCallback(
+      camera = camera,
+      bufferSize = bufferSize,
+      rotationDegrees = frameRotationDegrees,
+      sessionIdentity = sessionIdentity,
+      isPreviewMirrored = cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT,
+      generation = generation,
+    )
     if (!isCurrentStartRequest(generation)) {
       stopCamera()
       return
     }
+    _sampledFrameDispatcher?.start()
     camera.startPreview()
     if (configuredFocusMode == Camera.Parameters.FOCUS_MODE_AUTO) startPeriodicAutoFocus(camera, generation)
   }
@@ -251,9 +275,13 @@ internal class CameraPreviewController(
     camera: Camera,
     bufferSize: IntSize,
     rotationDegrees: Int,
+    sessionIdentity: CameraFrameTransformIdentity,
+    isPreviewMirrored: Boolean,
     generation: Long,
   ) {
-    val dispatcher = _frameDispatcher ?: return
+    val previewDispatcher = _previewFrameDispatcher
+    val sampledDispatcher = _sampledFrameDispatcher
+    if (previewDispatcher == null && sampledDispatcher == null) return
     val bufferBytes = checkNotNull(nv21BufferSize(bufferSize.width, bufferSize.height)) {
       "The camera reported an invalid NV21 preview size: $bufferSize."
     }
@@ -264,14 +292,26 @@ internal class CameraPreviewController(
         source.addCallbackBuffer(data)
         return@setPreviewCallbackWithBuffer
       }
-      dispatcher.offer(
-        data = data,
-        width = bufferSize.width,
-        height = bufferSize.height,
-        rotationDegrees = rotationDegrees,
-        transformIdentity = transformIdentityProvider(),
-        returnBuffer = { buffer -> returnCallbackBuffer(source, buffer) },
-      )
+      if (previewDispatcher != null) {
+        previewDispatcher.offer(
+          data = data,
+          width = bufferSize.width,
+          height = bufferSize.height,
+          rotationDegrees = rotationDegrees,
+          transformIdentity = transformIdentityProvider(),
+          returnBuffer = { buffer -> returnCallbackBuffer(source, buffer) },
+        )
+      } else {
+        var failure: Throwable? = null
+        try {
+          sampledDispatcher?.offer(sessionIdentity, isPreviewMirrored)
+        } catch (error: Throwable) {
+          failure = error
+        } finally {
+          failure = releaseFrameBuffer(data, { buffer -> returnCallbackBuffer(source, buffer) }, failure)
+        }
+        reportFrameFailure(failure, onError)
+      }
     }
   }
 
@@ -323,7 +363,8 @@ internal class CameraPreviewController(
     _periodicAutoFocus = null
     _camera = null
     _sessionIdentity = null
-    _frameDispatcher?.discardPending()
+    _previewFrameDispatcher?.discardPending()
+    _sampledFrameDispatcher?.stop()
     runCameraCleanupActions(
       actions = buildList {
         if (camera != null) {
@@ -370,7 +411,8 @@ internal class CameraPreviewController(
     _cameraHandler.post {
       try {
         stopCamera()
-        _frameDispatcher?.close()
+        _previewFrameDispatcher?.close()
+        _sampledFrameDispatcher?.close()
       } finally {
         _cameraThread.quitSafely()
       }
@@ -480,7 +522,7 @@ internal fun runCameraCleanupActions(
 
 /** 单线程发布最新 NV21 帧，并在处理完成或被替换时归还回调缓冲区。 */
 internal class CameraFrameDispatcher(
-  private val onFrame: (CameraFrame) -> Unit,
+  private val onFrame: (CameraFrame.Preview) -> Unit,
   private val onError: (Throwable) -> Unit,
 ) : AutoCloseable {
   private val _lock = Any()
@@ -541,7 +583,7 @@ internal class CameraFrameDispatcher(
       var failure: Throwable? = null
       try {
         onFrame(
-          CameraFrame(
+          CameraFrame.Preview(
             data = pending.data,
             width = pending.width,
             height = pending.height,
@@ -577,10 +619,156 @@ internal class CameraFrameDispatcher(
   }
 
   private fun reportOrThrow(failure: Throwable?) {
-    when (failure) {
-      null -> Unit
-      is Exception -> onError(failure)
-      else -> throw failure
+    reportFrameFailure(failure, onError)
+  }
+}
+
+/** 由预览帧节拍触发截图，并在分析线程同步发布最新采样帧。 */
+internal class PreviewSampledFrameDispatcher(
+  private val mainHandler: Handler,
+  private val intervalMillis: () -> Long,
+  private val captureFrame: (CameraFrameTransformIdentity, Boolean) -> CameraFrame.PreviewSampled?,
+  private val onFrame: (CameraFrame.PreviewSampled) -> Unit,
+  private val onError: (Throwable) -> Unit,
+  private val elapsedRealtimeMillis: () -> Long = SystemClock::elapsedRealtime,
+) : AutoCloseable {
+  private val _lock = Any()
+  private val _executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+    Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME)
+  }
+  private var _started = false
+  private var _closed = false
+  private var _lastSampleTimeMillis = 0L
+  private var _capturePosted = false
+  private var _processing = false
+  private var _pending: PendingSampledFrame? = null
+
+  fun start() {
+    synchronized(_lock) {
+      if (_started || _closed) return
+      _started = true
+      _lastSampleTimeMillis = elapsedRealtimeMillis()
+    }
+  }
+
+  fun offer(sessionIdentity: CameraFrameTransformIdentity, isPreviewMirrored: Boolean) {
+    var shouldPostCapture = false
+    synchronized(_lock) {
+      if (!_started || _closed) return
+      val now = elapsedRealtimeMillis()
+      val currentIntervalMillis = intervalMillis()
+      if (currentIntervalMillis <= 0 || now - _lastSampleTimeMillis < currentIntervalMillis) return
+      _lastSampleTimeMillis = now
+      _pending = PendingSampledFrame(sessionIdentity, isPreviewMirrored)
+      if (!_processing && !_capturePosted) {
+        _capturePosted = true
+        shouldPostCapture = true
+      }
+    }
+    if (shouldPostCapture && !mainHandler.post(::capturePending)) {
+      synchronized(_lock) { _capturePosted = false }
+      onError(IllegalStateException("The main thread is not available for preview sampling."))
+    }
+  }
+
+  private fun capturePending() {
+    val pending = synchronized(_lock) {
+      _capturePosted = false
+      if (!_started || _closed || _processing) return
+      _pending?.also {
+        _pending = null
+        _processing = true
+      }
+    } ?: return
+
+    val frame = try {
+      captureFrame(pending.sessionIdentity, pending.isPreviewMirrored)
+    } catch (error: Throwable) {
+      finishProcessing()
+      reportFrameFailure(error, onError)
+      return
+    }
+    if (frame == null) {
+      finishProcessing()
+      return
+    }
+    try {
+      _executor.execute { process(frame) }
+    } catch (error: Throwable) {
+      val failure = recycleSampledFrame(frame, error)
+      finishProcessing()
+      reportFrameFailure(failure, onError)
+    }
+  }
+
+  private fun process(frame: CameraFrame.PreviewSampled) {
+    var failure: Throwable? = null
+    try {
+      onFrame(frame)
+    } catch (error: Throwable) {
+      failure = error
+    } finally {
+      failure = recycleSampledFrame(frame, failure)
+      finishProcessing()
+    }
+    reportFrameFailure(failure, onError)
+  }
+
+  private fun finishProcessing() {
+    var shouldPostCapture = false
+    synchronized(_lock) {
+      _processing = false
+      if (_started && !_closed && _pending != null && !_capturePosted) {
+        _capturePosted = true
+        shouldPostCapture = true
+      }
+    }
+    if (shouldPostCapture && !mainHandler.post(::capturePending)) {
+      synchronized(_lock) { _capturePosted = false }
+      onError(IllegalStateException("The main thread is not available for preview sampling."))
+    }
+  }
+
+  fun stop() {
+    synchronized(_lock) {
+      _started = false
+      _pending = null
+    }
+  }
+
+  override fun close() {
+    synchronized(_lock) {
+      if (_closed) return
+      _closed = true
+      _started = false
+      _pending = null
+    }
+    _executor.shutdown()
+  }
+}
+
+private fun reportFrameFailure(failure: Throwable?, onError: (Throwable) -> Unit) {
+  when (failure) {
+    null -> Unit
+    is Exception -> onError(failure)
+    else -> throw failure
+  }
+}
+
+private fun recycleSampledFrame(
+  frame: CameraFrame.PreviewSampled,
+  failure: Throwable? = null,
+): Throwable? {
+  return try {
+    frame.data.recycle()
+    failure
+  } catch (recycleFailure: Throwable) {
+    when {
+      failure == null -> recycleFailure
+      failure is Error || recycleFailure !is Error -> failure.also {
+        if (failure !== recycleFailure) failure.addSuppressed(recycleFailure)
+      }
+      else -> recycleFailure.also { recycleFailure.addSuppressed(failure) }
     }
   }
 }
@@ -633,6 +821,11 @@ private data class PendingCameraFrame(
   val rotationDegrees: Int,
   val transformIdentity: CameraFrameTransformIdentity?,
   val returnBuffer: (ByteArray) -> Unit,
+)
+
+private data class PendingSampledFrame(
+  val sessionIdentity: CameraFrameTransformIdentity,
+  val isPreviewMirrored: Boolean,
 )
 
 internal fun choosePreviewSize(

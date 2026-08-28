@@ -1,6 +1,9 @@
 package com.sd.lib.compose.camera
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.Paint
 import androidx.annotation.AnyThread
 import androidx.annotation.MainThread
 import androidx.compose.runtime.Composable
@@ -56,20 +59,22 @@ class CameraPreviewState internal constructor() {
   }
 
   /**
-   * 把 [CameraFrame] 的原始缓冲区坐标映射到 Compose 预览区域。
-   * 矩阵包含显示旋转、[ContentScale] 和目标镜像状态。
+   * 把 [CameraFrame] 坐标映射到 Compose 预览区域。
+   * 原始帧矩阵包含显示旋转、[ContentScale] 和目标镜像；采样帧矩阵只包含目标镜像。
    */
   @AnyThread
   fun createTransformToPreview(frame: CameraFrame): Matrix? {
     val config = _transformConfig.get()
     if (!frame.transformToken.matches(config.transformIdentity)) return null
-    if (
-      frame.width != config.bufferSize.width ||
-      frame.height != config.bufferSize.height ||
-      normalizeRotation(frame.rotationDegrees) != config.rotationDegrees
-    ) {
-      return null
+    return when (frame) {
+      is CameraFrame.Preview -> createPreviewFrameTransform(frame, config)
+      is CameraFrame.PreviewSampled -> createSampledFrameTransform(frame, config)
     }
+  }
+
+  private fun createPreviewFrameTransform(frame: CameraFrame.Preview, config: PreviewTransformConfig): Matrix? {
+    if (frame.width != config.bufferSize.width || frame.height != config.bufferSize.height) return null
+    if (normalizeRotation(frame.rotationDegrees) != config.rotationDegrees) return null
     val geometry = config.geometry ?: return null
     val matrix = createBufferToPreviewMatrix(
       bufferSize = config.bufferSize,
@@ -88,6 +93,48 @@ class CameraPreviewState internal constructor() {
       )
     }
     return Matrix().apply { setConcat(mirror, matrix) }
+  }
+
+  private fun createSampledFrameTransform(
+    frame: CameraFrame.PreviewSampled,
+    config: PreviewTransformConfig,
+  ): Matrix? {
+    if (frame.rotationDegrees != 0 || config.geometry == null) return null
+    if (frame.data.width != config.previewSize.width || frame.data.height != config.previewSize.height) return null
+    if (!config.isMirrored) return Matrix()
+    return Matrix().apply {
+      setValues(
+        floatArrayOf(
+          -1f, 0f, config.previewSize.width.toFloat(),
+          0f, 1f, 0f,
+          0f, 0f, 1f,
+        ),
+      )
+    }
+  }
+
+  @MainThread
+  internal fun createSampledFrame(
+    source: Bitmap,
+    sessionIdentity: CameraFrameTransformIdentity,
+    isPreviewMirrored: Boolean,
+  ): CameraFrame.PreviewSampled? {
+    val config = _transformConfig.get()
+    if (config.sessionIdentity !== sessionIdentity) return null
+    val transformIdentity = config.transformIdentity ?: return null
+    if (config.geometry == null) return null
+    if (source.width != config.previewSize.width || source.height != config.previewSize.height) return null
+
+    val output = Bitmap.createBitmap(config.previewSize.width, config.previewSize.height, Bitmap.Config.ARGB_8888)
+    Canvas(output).apply {
+      if (isPreviewMirrored) scale(-1f, 1f, config.previewSize.width / 2f, config.previewSize.height / 2f)
+      drawBitmap(source, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
+    }
+    return CameraFrame.PreviewSampled(
+      data = output,
+      rotationDegrees = 0,
+      transformIdentity = transformIdentity,
+    )
   }
 
   @MainThread

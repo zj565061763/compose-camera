@@ -33,8 +33,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 /**
  * Compose 摄像头预览。
  *
- * [onFrame] 非空时在 `CameraPreview-Analysis` 单线程同步接收最新帧；
- * [CameraFrame.data] 是 NV21 数据，只在回调期间有效，异步处理前必须复制数据或调用 [CameraFrame.toBitmap]。
+ * [frameProcessor] 控制是否在 `CameraPreview-Analysis` 单线程同步接收最新帧。
  *
  * [cameraId] 是不透明的摄像头标识；为 `null` 时选择设备列表中的第一项。
  * [mirrorMode] 只影响预览和坐标矩阵，不修改帧数据。
@@ -51,7 +50,7 @@ fun CameraPreview(
   contentScale: ContentScale = ContentScale.Crop,
   displayRotation: Int? = null,
   onError: (Throwable) -> Unit = {},
-  onFrame: ((CameraFrame) -> Unit)? = null,
+  frameProcessor: FrameProcessor = FrameProcessor.None,
 ) {
   cameraId?.also { require(it.isNotBlank()) { "cameraId must not be blank." } }
   displayRotation?.also { rotation ->
@@ -63,11 +62,11 @@ fun CameraPreview(
   val lifecycleOwner = LocalLifecycleOwner.current
   val textureView = remember(context) { TextureView(context) }
 
-  val currentOnFrame by rememberUpdatedState(onFrame)
+  val currentFrameProcessor by rememberUpdatedState(frameProcessor)
   val currentOnError by rememberUpdatedState(onError)
   val currentMirrorMode by rememberUpdatedState(mirrorMode)
   val errorDispatcher = remember { MainThreadErrorDispatcher { error -> currentOnError(error) } }
-  val hasFrameCallback = onFrame != null
+  val frameProcessorMode = frameProcessor.mode
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
   var activePreviewMirrored by remember { mutableStateOf<Boolean?>(null) }
 
@@ -111,7 +110,7 @@ fun CameraPreview(
     cameraId,
     effectiveDisplayRotation,
     hasValidPreviewSize,
-    hasFrameCallback,
+    frameProcessorMode,
     retryGeneration,
     hasLoadedCameraDevices,
     cameraDeviceKey,
@@ -135,10 +134,27 @@ fun CameraPreview(
             isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
           )
         },
-        onFrame = if (hasFrameCallback) {
-          { frame -> currentOnFrame?.invoke(frame) }
-        } else {
-          null
+        frameProcessor = when (frameProcessorMode) {
+          FrameProcessorMode.NONE -> ActiveFrameProcessor.None
+          FrameProcessorMode.PREVIEW -> ActiveFrameProcessor.Preview { frame ->
+            (currentFrameProcessor as? FrameProcessor.Preview)?.onFrame?.invoke(frame)
+          }
+          FrameProcessorMode.PREVIEW_SAMPLED -> ActiveFrameProcessor.PreviewSampled(
+            intervalMillis = {
+              (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.intervalMillis ?: Long.MAX_VALUE
+            },
+            onFrame = { frame ->
+              (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.onFrame?.invoke(frame)
+            },
+          )
+        },
+        captureSampledFrame = captureSampledFrame@ { sessionIdentity, isPreviewMirrored ->
+          val source = textureView.bitmap ?: return@captureSampledFrame null
+          try {
+            state.createSampledFrame(source, sessionIdentity, isPreviewMirrored)
+          } finally {
+            source.recycle()
+          }
         },
         onError = errorDispatcher::dispatch,
         onSessionClosed = { sessionIdentity ->

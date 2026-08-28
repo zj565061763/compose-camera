@@ -3,7 +3,7 @@ package com.sd.lib.compose.camera
 /**
  * 标识 [CameraFrame] 所属的预览变换。
  *
- * 此对象不持有帧图像，可以在 `CameraPreview.onFrame` 返回后安全保留。
+ * 此对象不持有帧图像，可以在帧回调返回后安全保留。
  * 使用 [isSameTransform] 判断两个令牌是否属于同一个相机会话和 Compose 显示坐标配置。
  */
 class CameraFrameTransformToken internal constructor(

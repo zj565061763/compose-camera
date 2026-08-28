@@ -2,6 +2,8 @@
 
 package com.sd.lib.compose.camera
 
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.ImageFormat
 import android.graphics.RectF
 import android.hardware.Camera
@@ -15,6 +17,7 @@ import com.google.common.truth.Truth.assertThat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -86,6 +89,45 @@ class CameraPreviewStateTest {
     val points = floatArrayOf(0f, 0f, 4f, 2f).also(matrix::mapPoints)
 
     assertThat(points.asList()).containsExactly(5f, 0f, -1f, 3f).inOrder()
+  }
+
+  @Test
+  fun createTransformToPreview_sampledFrameOnlyAppliesTargetMirror() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(200, 100), ContentScale.Crop, isMirrored = true)
+    state.startSession(identity, IntSize(640, 480), rotationDegrees = 90, isMirrored = true)
+    val bitmap = Bitmap.createBitmap(200, 100, Bitmap.Config.ARGB_8888)
+    val frame = CameraFrame.PreviewSampled(bitmap, rotationDegrees = 0, transformIdentity = identity)
+
+    val matrix = checkNotNull(state.createTransformToPreview(frame))
+    val points = floatArrayOf(0f, 0f, 200f, 100f).also(matrix::mapPoints)
+
+    assertThat(points.asList()).containsExactly(200f, 0f, 0f, 100f).inOrder()
+    bitmap.recycle()
+  }
+
+  @Test
+  fun createSampledFrame_appliesCropAndRemovesPlatformMirror() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(2, 2), ContentScale.FillBounds, isMirrored = true)
+    state.startSession(identity, IntSize(2, 2), rotationDegrees = 0, isMirrored = true)
+    val source = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply {
+      setPixel(0, 0, Color.RED)
+      setPixel(0, 1, Color.RED)
+      setPixel(1, 0, Color.BLUE)
+      setPixel(1, 1, Color.BLUE)
+    }
+
+    val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = true))
+
+    assertThat(frame.rotationDegrees).isEqualTo(0)
+    assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.BLUE)
+    assertThat(frame.data.getPixel(1, 0)).isEqualTo(Color.RED)
+    assertThat(state.createTransformToPreview(frame)).isNotNull()
+    frame.data.recycle()
+    source.recycle()
   }
 
   @Test
@@ -414,7 +456,147 @@ class CameraPreviewStateTest {
     assertThat(callbackFailure.suppressed.asList()).containsExactly(bufferFailure)
     dispatcher.close()
   }
+
+  @Test
+  fun sampledFrameDispatcher_waitsForIntervalAndRunsOnAnalysisThread() {
+    val now = AtomicLong(1_000)
+    val callback = CountDownLatch(1)
+    val result = AtomicReference<SampledFrameResult?>()
+    val error = AtomicReference<Throwable?>()
+    val identity = CameraFrameTransformIdentity()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = Handler(Looper.getMainLooper()),
+      intervalMillis = { 100 },
+      captureFrame = { currentIdentity, _ ->
+        CameraFrame.PreviewSampled(
+          data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+          rotationDegrees = 0,
+          transformIdentity = currentIdentity,
+        )
+      },
+      onFrame = { frame ->
+        result.set(
+          SampledFrameResult(
+            token = frame.transformToken,
+            threadName = Thread.currentThread().name,
+            recycledDuringCallback = frame.data.isRecycled,
+          ),
+        )
+        callback.countDown()
+      },
+      onError = error::set,
+      elapsedRealtimeMillis = now::get,
+    )
+    dispatcher.start()
+
+    now.set(1_099)
+    dispatcher.offer(identity, isPreviewMirrored = false)
+    assertThat(callback.await(100, TimeUnit.MILLISECONDS)).isFalse()
+    now.set(1_100)
+    dispatcher.offer(identity, isPreviewMirrored = false)
+
+    assertThat(callback.await(5, TimeUnit.SECONDS)).isTrue()
+    dispatcher.close()
+    assertThat(error.get()).isNull()
+    assertThat(checkNotNull(result.get()).threadName).isEqualTo(CAMERA_ANALYSIS_THREAD_NAME)
+    assertThat(checkNotNull(result.get()).recycledDuringCallback).isFalse()
+    assertThat(checkNotNull(result.get()).token.matches(identity)).isTrue()
+  }
+
+  @Test
+  fun sampledFrameDispatcher_keepsOnlyLatestPendingCapture() {
+    val now = AtomicLong(1_000)
+    val firstCallbackStarted = CountDownLatch(1)
+    val releaseFirstCallback = CountDownLatch(1)
+    val callbacks = CountDownLatch(2)
+    val capturedIdentities = mutableListOf<CameraFrameTransformIdentity>()
+    val error = AtomicReference<Throwable?>()
+    val firstIdentity = CameraFrameTransformIdentity()
+    val replacedIdentity = CameraFrameTransformIdentity()
+    val latestIdentity = CameraFrameTransformIdentity()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = Handler(Looper.getMainLooper()),
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        synchronized(capturedIdentities) { capturedIdentities += identity }
+        CameraFrame.PreviewSampled(
+          data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+          rotationDegrees = 0,
+          transformIdentity = identity,
+        )
+      },
+      onFrame = { frame ->
+        if (frame.transformToken.matches(firstIdentity)) {
+          firstCallbackStarted.countDown()
+          check(releaseFirstCallback.await(5, TimeUnit.SECONDS))
+        }
+        callbacks.countDown()
+      },
+      onError = error::set,
+      elapsedRealtimeMillis = now::get,
+    )
+    dispatcher.start()
+
+    now.set(1_100)
+    dispatcher.offer(firstIdentity, isPreviewMirrored = false)
+    assertThat(firstCallbackStarted.await(5, TimeUnit.SECONDS)).isTrue()
+    now.set(1_200)
+    dispatcher.offer(replacedIdentity, isPreviewMirrored = false)
+    now.set(1_300)
+    dispatcher.offer(latestIdentity, isPreviewMirrored = false)
+    releaseFirstCallback.countDown()
+
+    assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
+    dispatcher.close()
+    assertThat(error.get()).isNull()
+    assertThat(capturedIdentities).containsExactly(firstIdentity, latestIdentity).inOrder()
+  }
+
+  @Test
+  fun sampledFrameDispatcher_callbackFailureIsReportedAndBitmapIsRecycled() {
+    val now = AtomicLong(1_000)
+    val failureReceived = CountDownLatch(1)
+    val callbackFailure = IllegalStateException("sample callback")
+    val receivedFailure = AtomicReference<Throwable?>()
+    val bitmap = AtomicReference<Bitmap?>()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = Handler(Looper.getMainLooper()),
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        val data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).also(bitmap::set)
+        CameraFrame.PreviewSampled(data, rotationDegrees = 0, transformIdentity = identity)
+      },
+      onFrame = { throw callbackFailure },
+      onError = { error ->
+        receivedFailure.set(error)
+        failureReceived.countDown()
+      },
+      elapsedRealtimeMillis = now::get,
+    )
+    dispatcher.start()
+
+    now.set(1_100)
+    dispatcher.offer(CameraFrameTransformIdentity(), isPreviewMirrored = false)
+
+    assertThat(failureReceived.await(5, TimeUnit.SECONDS)).isTrue()
+    dispatcher.close()
+    assertThat(receivedFailure.get()).isSameInstanceAs(callbackFailure)
+    assertThat(checkNotNull(bitmap.get()).isRecycled).isTrue()
+  }
+
+  @Test
+  fun previewSampledProcessor_rejectsNonPositiveInterval() {
+    assertThrows(IllegalArgumentException::class.java) {
+      FrameProcessor.PreviewSampled(intervalMillis = 0) {}
+    }
+  }
 }
+
+private data class SampledFrameResult(
+  val token: CameraFrameTransformToken,
+  val threadName: String,
+  val recycledDuringCallback: Boolean,
+)
 
 private fun CameraFrameDispatcher.offerFrame(
   value: Int,
@@ -447,8 +629,8 @@ private fun frame(
   height: Int,
   rotationDegrees: Int,
   data: ByteArray = ByteArray(width * height * 3 / 2),
-): CameraFrame {
-  return CameraFrame(
+): CameraFrame.Preview {
+  return CameraFrame.Preview(
     data = data,
     width = width,
     height = height,

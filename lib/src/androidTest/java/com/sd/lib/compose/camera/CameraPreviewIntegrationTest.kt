@@ -55,22 +55,23 @@ class CameraPreviewIntegrationTest {
         modifier = Modifier.size(240.dp),
         displayRotation = Surface.ROTATION_0,
         onError = error::set,
-        onFrame = { frame ->
+        frameProcessor = FrameProcessor.Preview { frame ->
           if (frameResult.get() == null) {
-            val bitmap = frame.toBitmap() ?: return@CameraPreview
-            frameResult.compareAndSet(
-              null,
-              FrameResult(
-                width = frame.width,
-                height = frame.height,
-                bitmapWidth = bitmap.width,
-                bitmapHeight = bitmap.height,
-                rotationDegrees = frame.rotationDegrees,
-                threadName = Thread.currentThread().name,
-              ),
-            )
-            bitmap.recycle()
-            frameReceived.countDown()
+            frame.toBitmap()?.also { bitmap ->
+              frameResult.compareAndSet(
+                null,
+                FrameResult(
+                  width = frame.width,
+                  height = frame.height,
+                  bitmapWidth = bitmap.width,
+                  bitmapHeight = bitmap.height,
+                  rotationDegrees = frame.rotationDegrees,
+                  threadName = Thread.currentThread().name,
+                ),
+              )
+              bitmap.recycle()
+              frameReceived.countDown()
+            }
           }
         },
       )
@@ -88,7 +89,46 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
-  fun withoutFrameCallback_usesCameraThreadWithoutAnalysisThread() {
+  fun cameraPreview_sampledFrameMatchesPreviewCoordinates() {
+    assumeCameraAvailable()
+    val state = CameraPreviewState()
+    val frameReceived = CountDownLatch(1)
+    val frameResult = AtomicReference<SampledFrameResult?>()
+    val error = AtomicReference<Throwable?>()
+
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(240.dp),
+        state = state,
+        onError = error::set,
+        frameProcessor = FrameProcessor.PreviewSampled(intervalMillis = 100) { frame ->
+          if (state.createTransformToPreview(frame) != null && frameResult.get() == null) {
+            frameResult.compareAndSet(
+              null,
+              SampledFrameResult(
+                width = frame.data.width,
+                height = frame.data.height,
+                rotationDegrees = frame.rotationDegrees,
+                threadName = Thread.currentThread().name,
+              ),
+            )
+            frameReceived.countDown()
+          }
+        },
+      )
+    }
+
+    assertThat(frameReceived.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(error.get()).isNull()
+    val result = checkNotNull(frameResult.get())
+    assertThat(result.width).isGreaterThan(0)
+    assertThat(result.height).isEqualTo(result.width)
+    assertThat(result.rotationDegrees).isEqualTo(0)
+    assertThat(result.threadName).isEqualTo(CAMERA_ANALYSIS_THREAD_NAME)
+  }
+
+  @Test
+  fun withoutFrameProcessor_usesCameraThreadWithoutAnalysisThread() {
     assumeCameraAvailable()
     val initialCameraThreads = activeCameraThreads()
     val initialAnalysisThreads = activeAnalysisThreads()
@@ -109,6 +149,63 @@ class CameraPreviewIntegrationTest {
     assertThat(state.previewResolution.value).isNotEqualTo(IntSize.Zero)
     assertThat(activeCameraThreads() - initialCameraThreads).isNotEmpty()
     assertThat(activeAnalysisThreads() - initialAnalysisThreads).isEmpty()
+  }
+
+  @Test
+  fun frameProcessorCallbackChange_doesNotRestartSession() {
+    assumeCameraAvailable()
+    val firstFrame = CountDownLatch(1)
+    val updatedFrame = CountDownLatch(1)
+    val callback = mutableStateOf<(CameraFrame.Preview) -> Unit>({ firstFrame.countDown() })
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(240.dp),
+        state = state,
+        onError = error::set,
+        frameProcessor = FrameProcessor.Preview(callback.value),
+      )
+    }
+    assertThat(firstFrame.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    val sessionIdentity = checkNotNull(state.currentSessionIdentity())
+
+    _composeRule.runOnIdle { callback.value = { updatedFrame.countDown() } }
+    _composeRule.waitForIdle()
+
+    assertThat(updatedFrame.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(error.get()).isNull()
+    assertThat(state.currentSessionIdentity()).isSameInstanceAs(sessionIdentity)
+  }
+
+  @Test
+  fun frameProcessorModeChange_restartsSession() {
+    assumeCameraAvailable()
+    val processor = mutableStateOf<FrameProcessor>(FrameProcessor.None)
+    val frameReceived = CountDownLatch(1)
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(240.dp),
+        state = state,
+        onError = error::set,
+        frameProcessor = processor.value,
+      )
+    }
+    waitForPreview(state, error)
+    val initialSessionIdentity = checkNotNull(state.currentSessionIdentity())
+
+    _composeRule.runOnIdle {
+      processor.value = FrameProcessor.Preview { frameReceived.countDown() }
+    }
+    _composeRule.waitForIdle()
+
+    assertThat(frameReceived.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(error.get()).isNull()
+    assertThat(state.currentSessionIdentity()).isNotSameInstanceAs(initialSessionIdentity)
   }
 
   @Test
@@ -161,7 +258,7 @@ class CameraPreviewIntegrationTest {
         modifier = Modifier.size(previewSize.value),
         state = state,
         onError = error::set,
-        onFrame = { frame ->
+        frameProcessor = FrameProcessor.Preview { frame ->
           if (state.createTransformToPreview(frame) != null) {
             val token = frame.transformToken
             val initialToken = firstToken.get()
@@ -244,7 +341,7 @@ class CameraPreviewIntegrationTest {
         modifier = Modifier.size(240.dp),
         state = state,
         onError = error::set,
-        onFrame = { frame ->
+        frameProcessor = FrameProcessor.Preview { frame ->
           val token = frame.transformToken
           val initialToken = firstToken.get()
           if (initialToken == null) {
@@ -319,7 +416,8 @@ class CameraPreviewIntegrationTest {
         previewViewSize = IntSize(240, 240),
         transformIdentityProvider = { null },
         onSessionStarted = { _, _, _, _ -> error("Camera session must not start.") },
-        onFrame = null,
+        frameProcessor = ActiveFrameProcessor.None,
+        captureSampledFrame = { _, _ -> null },
         onError = receivedError::set,
         onSessionClosed = {},
       )
@@ -357,7 +455,7 @@ class CameraPreviewIntegrationTest {
           modifier = Modifier.size(240.dp),
           state = state,
           onError = error::set,
-          onFrame = { frameReceived.countDown() },
+          frameProcessor = FrameProcessor.Preview { frameReceived.countDown() },
         )
       }
     }
@@ -403,6 +501,13 @@ class CameraPreviewIntegrationTest {
     val height: Int,
     val bitmapWidth: Int,
     val bitmapHeight: Int,
+    val rotationDegrees: Int,
+    val threadName: String,
+  )
+
+  private data class SampledFrameResult(
+    val width: Int,
+    val height: Int,
     val rotationDegrees: Int,
     val threadName: String,
   )

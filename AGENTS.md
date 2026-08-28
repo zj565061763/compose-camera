@@ -85,8 +85,8 @@ git diff --check
 - `cameraId` 对调用方是不透明的 `String`，不得公开当前后端的数字 ID 语义或列表排序契约。
 - `CameraPreviewState` 属于单个正在组合的预览，保存 `previewResolution`、retry generation 和帧到预览的变换快照，不能在多个同时存在的预览间共享。
 - `CameraDevicesState` 表示最近一次枚举到的设备列表、加载或错误状态和主动刷新入口，可由设备选择 UI 与多个预览共享；共享设备状态不代表支持不同 cameraId 同时预览。
-- `CameraFrame.data` 只保证在同步 `onFrame` 回调期间有效；允许跨回调保留的是数据副本、独立 `Bitmap` 或轻量 `CameraFrameTransformToken`。
-- `CameraFrame` 只能在 NV21 数据、宽高和旋转都有效时创建；公开的 `toBitmap()` 转换失败时返回 `null`。
+- `CameraFrame.Preview.data` 和 `CameraFrame.PreviewSampled.data` 只保证在同步帧回调期间有效；允许跨回调保留的是数据副本、独立 `Bitmap` 或轻量 `CameraFrameTransformToken`。
+- `CameraFrame.Preview` 只能在 NV21 数据、宽高和旋转都有效时创建；公开的 `toBitmap()` 转换失败时返回 `null`。
 
 ## 设备发现与手动刷新
 
@@ -103,14 +103,14 @@ git diff --check
 - 会话必须同时受 Lifecycle 和 `TextureView.SurfaceTexture` 生命周期约束；Lifecycle 停止、Surface 销毁或组件释放时关闭相机。
 - Surface 销毁时必须先在相机线程停止会话，再释放 `SurfaceTexture`。
 - 普通布局尺寸、`contentScale`、镜像模式和用户 lambda 变化只更新显示、坐标或回调引用，不得重复打开相机。
-- displayRotation、cameraId、帧回调启用状态和 retry generation 变化需要重建会话。
-- 只有 `onFrame != null` 时才创建回调缓冲区和专用单线程 executor。
+- displayRotation、cameraId、帧处理模式和 retry generation 变化需要重建会话。
+- 只有 `frameProcessor` 不是 `FrameProcessor.None` 时才创建回调缓冲区和专用单线程 executor。
 - Controller 在 `CameraPreview-Camera` 专用线程执行全部相机会话操作，只释放自己打开的相机和创建的线程，禁止影响进程内其他相机使用方。
 - 库不协调并发相机会话，不支持不同 cameraId 同时预览。
 
 ## 预览与帧坐标转换
 
-- 参数设置后必须读取设备实际采用的 preview format 和 preview size；启用帧回调时格式必须是 NV21，实际尺寸用于发布 `previewResolution`，它表示原始帧缓冲区尺寸而不是 Compose 布局尺寸。
+- 参数设置后必须读取设备实际采用的 preview format 和 preview size；启用帧处理时格式必须是 NV21，实际尺寸用于发布 `previewResolution`，它表示原始帧缓冲区尺寸而不是 Compose 布局尺寸。
 - `TextureView` 必须按旋转后的缓冲区比例和 `ContentScale` 布局，禁止直接拉伸到 Compose 区域。
 - 前置摄像头的平台预览显示方向和原始帧旋转角度必须分别计算，禁止把镜像补偿后的显示方向用于帧数据或坐标变换。
 - 平台默认镜像前置预览；额外 `graphicsLayer` 镜像只用于达到 `CameraMirrorMode` 指定的目标状态。
@@ -121,7 +121,7 @@ git diff --check
 
 ## 线程、错误与清理
 
-- `onFrame` 在名为 `CameraPreview-Analysis` 的专用线程同步执行，只保留正在处理的帧和最新待处理帧。
+- 帧处理回调在名为 `CameraPreview-Analysis` 的专用线程同步执行，只保留正在处理的帧和最新待处理帧或采样请求。
 - 相机打开、配置、预览、对焦、回调缓冲区归还和释放统一在 `CameraPreview-Camera` 专用线程执行。
 - 优先使用连续对焦模式；只支持 `FOCUS_MODE_AUTO` 时，每两秒重新触发一次对焦，并在会话停止时取消任务。
 - 每个相机回调缓冲区都必须在 `finally` 中归还。释放会丢弃尚未开始的帧，但不能中断已经开始的回调。

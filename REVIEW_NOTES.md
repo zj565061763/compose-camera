@@ -16,9 +16,10 @@
 - `CameraPreviewState` 属于单个正在组合的预览，不能在多个同时存在的预览间共享。
 - `CameraDevicesState` 可以由设备选择 UI 和多个预览共享；共享设备状态不代表支持多个相机会话同时运行。
 - `CameraPreviewState.previewResolution` 表示当前会话使用的原始预览帧分辨率，不是 Compose 布局尺寸；会话未运行时为 `IntSize.Zero`。
-- `onFrame` 默认为 `null`。非空时输出 NV21 数据。
-- `CameraFrame.data` 只保证在同步回调期间有效。允许跨回调保留的是复制后的数据、`Bitmap` 或轻量 `CameraFrameTransformToken`。
-- `CameraFrame.toBitmap()` 返回未旋转的独立图片，转换失败时返回 `null`，不抛出普通转换异常。
+- `frameProcessor` 默认为 `FrameProcessor.None`。`Preview` 输出 NV21 数据，`PreviewSampled` 按间隔输出预览区域截图。
+- `CameraFrame.Preview.data` 和 `CameraFrame.PreviewSampled.data` 只保证在同步回调期间有效。允许跨回调保留的是数据副本、独立 `Bitmap` 或轻量 `CameraFrameTransformToken`。
+- `CameraFrame.Preview.toBitmap()` 返回未旋转的独立图片，转换失败时返回 `null`，不抛出普通转换异常。
+- `CameraFrame.PreviewSampled.data` 已应用显示旋转和 `ContentScale`，不包含平台镜像、目标镜像或预览上层内容，`rotationDegrees` 固定为 `0`。
 - `mirrorMode` 只影响预览和坐标矩阵，不修改帧数据。
 - `displayRotation == null` 时监听当前 View 所在显示器的旋转；显式值必须是 `Surface.ROTATION_*`。
 - 库 Manifest 声明 `CAMERA` 权限和可选相机硬件；应用仍负责运行时授权，并且只能在授权后组合 `CameraPreview`。
@@ -38,8 +39,8 @@
 - `CameraPreview` 只有获得非零 Compose 布局宽高且设备首次枚举完成后，才创建 `CameraPreviewController`。零尺寸是正常的隐藏或布局过渡，不报告错误。
 - 会话由 `LifecycleOwner` 和 `TextureView.SurfaceTexture` 共同控制；Lifecycle 进入 `STARTED` 且 Surface 可用时打开，进入 `STOPPED`、Surface 销毁或组件释放时关闭。
 - Surface 销毁回调必须转移释放责任，先在相机线程停止会话，再释放 `SurfaceTexture`。
-- 显示旋转、cameraId、是否启用帧回调、retry generation 或相关设备快照变化会重建会话。
-- 普通布局尺寸、`contentScale`、镜像模式、`onFrame` 或 `onError` lambda 实例变化不得重复打开相机。
+- 显示旋转、cameraId、帧处理模式、retry generation 或相关设备快照变化会重建会话。
+- 普通布局尺寸、`contentScale`、镜像模式、处理间隔、用户 lambda 或 `onError` lambda 实例变化不得重复打开相机。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
 - Controller 在 `CameraPreview-Camera` 专用线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作。
 - Controller 只释放自己打开的相机和创建的工作线程，不得影响进程内其他相机使用方。
@@ -48,7 +49,7 @@
 ## 预览尺寸、旋转与镜像
 
 - Controller 从设备支持的预览尺寸中选择旋转后最接近 Compose 区域比例的尺寸，并优先限制在 `1280 × 960` 像素以内；若设备没有符合上限的尺寸，则从全部尺寸中选择。
-- 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用帧回调且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
+- 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用任一帧处理模式且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
 - `TextureView` 按旋转后的原始帧比例和 `ContentScale` 计算内容尺寸，避免把相机缓冲区直接拉伸到 Compose 区域。
 - 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
 - 平台默认镜像前置预览。额外 `graphicsLayer` 水平翻转只用于补偿平台默认状态与 `CameraMirrorMode` 目标状态的差异。
@@ -57,12 +58,13 @@
 - 变换链为 `raw frame -> display rotation -> ContentScale -> target mirror`。
 - 新相机会话、有效布局尺寸、`contentScale` 或目标镜像变化必须使旧 transform token 失效。
 - 异步分析结果写回 UI 前必须使用 `CameraPreviewState.isFrameTransformCurrent()` 校验 token。
-- `createTransformToPreview()` 输入是 `CameraFrame.data` 的原始缓冲区坐标。若检测器输出已经按 `rotationDegrees` 旋转后的坐标，调用方需先转回原始缓冲区坐标。
+- `createTransformToPreview()` 对 `Preview` 输入原始缓冲区坐标；若检测器输出已经按 `rotationDegrees` 旋转，调用方需先转回原始缓冲区坐标。对 `PreviewSampled` 输入 Bitmap 坐标，只补充目标镜像。
 
 ## 帧线程与缓冲区
 
-- 只有 `onFrame != null` 时才创建名为 `CameraPreview-Analysis` 的专用单线程 executor 和三个 NV21 回调缓冲区。
-- 分发策略保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
+- 只有 `frameProcessor` 不是 `None` 时才创建名为 `CameraPreview-Analysis` 的专用单线程 executor 和三个 NV21 回调缓冲区。
+- `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
+- `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
 - NV21 帧宽高必须为正偶数，所需字节数必须能安全表示为 `Int`，实际数据长度不得小于 `width × height × 3 / 2`。不符合条件的回调缓冲区直接归还，不创建 `CameraFrame`。
 - 每个相机回调缓冲区都必须在处理完成、被替换、被丢弃或 dispatcher 关闭时归还。
 - 帧回调异常和缓冲区归还异常必须保留正确的主异常及 suppressed 异常；致命 `Error` 不得作为业务异常吞掉。
@@ -79,7 +81,7 @@
 
 ## 测试与验证
 
-- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、token 失效、尺寸选择、对焦调度、NV21 校验、Bitmap 转换、最新帧分发和异常安全清理。
+- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、token 失效、尺寸选择、对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发和异常安全清理。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和工作线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
