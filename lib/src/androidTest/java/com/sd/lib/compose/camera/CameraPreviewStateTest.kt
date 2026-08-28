@@ -199,6 +199,20 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun contentScaleChange_invalidatesOldFrameTokenWhenGeometryIsUnchanged() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(200, 200), ContentScale.Crop, isMirrored = false)
+    state.startSession(identity, IntSize(200, 200), rotationDegrees = 0, isMirrored = false)
+    val oldFrame = frame(identity, 200, 200, 0)
+    assertThat(state.isFrameTransformCurrent(oldFrame.transformToken)).isTrue()
+
+    state.updatePreviewLayout(IntSize(200, 200), ContentScale.Fit, isMirrored = false)
+
+    assertThat(state.isFrameTransformCurrent(oldFrame.transformToken)).isFalse()
+  }
+
+  @Test
   fun startSession_overridesStaleMirrorState() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()

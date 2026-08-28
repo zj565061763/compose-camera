@@ -158,7 +158,7 @@ class CameraPreviewState internal constructor() {
       previewSize = previewSize,
       contentScale = contentScale,
     )
-    val transformChanged = current.geometry != geometry || current.isMirrored != isMirrored
+    val transformChanged = current.geometry != geometry || current.contentScale != contentScale || current.isMirrored != isMirrored
     _transformConfig.set(
       current.copy(
         previewSize = previewSize,
