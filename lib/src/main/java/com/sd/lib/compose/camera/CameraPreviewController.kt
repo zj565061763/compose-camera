@@ -408,15 +408,21 @@ internal class CameraPreviewController(
     if (textureView.surfaceTextureListener === _surfaceTextureListener) {
       textureView.surfaceTextureListener = null
     }
-    _cameraHandler.post {
-      try {
-        stopCamera()
-        _previewFrameDispatcher?.close()
-        _sampledFrameDispatcher?.close()
-      } finally {
-        _cameraThread.quitSafely()
-      }
-    }
+    runCameraCleanupActions(
+      actions = buildList {
+        _previewFrameDispatcher?.also { dispatcher -> add(dispatcher::close) }
+        _sampledFrameDispatcher?.also { dispatcher -> add(dispatcher::close) }
+      },
+      finalAction = {
+        _cameraHandler.post {
+          try {
+            stopCamera()
+          } finally {
+            _cameraThread.quitSafely()
+          }
+        }
+      },
+    )?.also(onError)
   }
 }
 

@@ -437,6 +437,39 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun frameDispatcher_closeDiscardsPendingFrameAndFinishesStartedCallback() {
+    val firstStarted = CountDownLatch(1)
+    val releaseFirst = CountDownLatch(1)
+    val firstFinished = CountDownLatch(1)
+    val buffersReturned = CountDownLatch(2)
+    val callbackCount = AtomicInteger()
+    val returned = mutableListOf<Int>()
+    val error = AtomicReference<Throwable?>()
+    val dispatcher = CameraFrameDispatcher(
+      onFrame = {
+        callbackCount.incrementAndGet()
+        firstStarted.countDown()
+        check(releaseFirst.await(5, TimeUnit.SECONDS))
+        firstFinished.countDown()
+      },
+      onError = error::set,
+    )
+
+    dispatcher.offerFrame(1, returned, buffersReturned)
+    assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
+    dispatcher.offerFrame(2, returned, buffersReturned)
+
+    dispatcher.close()
+    releaseFirst.countDown()
+
+    assertThat(firstFinished.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(callbackCount.get()).isEqualTo(1)
+    assertThat(returned).containsExactly(1, 2)
+    assertThat(error.get()).isNull()
+  }
+
+  @Test
   fun frameDispatcher_invalidFrameIsReturnedWithoutCallback() {
     val callback = CountDownLatch(1)
     val returned = CountDownLatch(1)
@@ -601,6 +634,53 @@ class CameraPreviewStateTest {
     dispatcher.close()
     assertThat(error.get()).isNull()
     assertThat(capturedIdentities).containsExactly(firstIdentity, latestIdentity).inOrder()
+  }
+
+  @Test
+  fun sampledFrameDispatcher_closeDiscardsPendingCaptureAndFinishesStartedCallback() {
+    val now = AtomicLong(1_000)
+    val firstStarted = CountDownLatch(1)
+    val releaseFirst = CountDownLatch(1)
+    val firstFinished = CountDownLatch(1)
+    val callbackCount = AtomicInteger()
+    val capturedIdentities = mutableListOf<CameraFrameTransformIdentity>()
+    val error = AtomicReference<Throwable?>()
+    val firstIdentity = CameraFrameTransformIdentity()
+    val pendingIdentity = CameraFrameTransformIdentity()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = Handler(Looper.getMainLooper()),
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        synchronized(capturedIdentities) { capturedIdentities += identity }
+        CameraFrame.PreviewSampled(
+          data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+          rotationDegrees = 0,
+          transformIdentity = identity,
+        )
+      },
+      onFrame = {
+        callbackCount.incrementAndGet()
+        firstStarted.countDown()
+        check(releaseFirst.await(5, TimeUnit.SECONDS))
+        firstFinished.countDown()
+      },
+      onError = error::set,
+      elapsedRealtimeMillis = now::get,
+    )
+    dispatcher.start()
+    now.set(1_100)
+    dispatcher.offer(firstIdentity, isPreviewMirrored = false)
+    assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
+    now.set(1_200)
+    dispatcher.offer(pendingIdentity, isPreviewMirrored = false)
+
+    dispatcher.close()
+    releaseFirst.countDown()
+
+    assertThat(firstFinished.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(callbackCount.get()).isEqualTo(1)
+    assertThat(capturedIdentities).containsExactly(firstIdentity)
+    assertThat(error.get()).isNull()
   }
 
   @Test
