@@ -127,7 +127,6 @@ class CameraPreviewStateTest {
 
     val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = true))
 
-    assertThat(state.currentSampledFrameSourceSize(identity)).isEqualTo(IntSize(4, 2))
     assertThat(frame.rotationDegrees).isEqualTo(0)
     assertThat(frame.data.width).isEqualTo(2)
     assertThat(frame.data.height).isEqualTo(2)
@@ -154,7 +153,6 @@ class CameraPreviewStateTest {
 
     val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = true))
 
-    assertThat(state.currentSampledFrameSourceSize(identity)).isEqualTo(IntSize(3, 3))
     assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.RED)
     assertThat(frame.data.getPixel(1, 0)).isEqualTo(Color.BLUE)
     assertThat(frame.data.getPixel(2, 0)).isEqualTo(Color.YELLOW)
@@ -173,13 +171,64 @@ class CameraPreviewStateTest {
 
     val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = false))
 
-    assertThat(state.currentSampledFrameSourceSize(identity)).isEqualTo(IntSize(4, 2))
     assertThat(frame.data.width).isEqualTo(4)
     assertThat(frame.data.height).isEqualTo(4)
     assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.TRANSPARENT)
     assertThat(frame.data.getPixel(0, 1)).isEqualTo(Color.RED)
     assertThat(frame.data.getPixel(3, 2)).isEqualTo(Color.RED)
     assertThat(frame.data.getPixel(3, 3)).isEqualTo(Color.TRANSPARENT)
+    frame.data.recycle()
+    source.recycle()
+  }
+
+  @Test
+  fun createSampledFrame_previewSizedSourceDoesNotCropAgain() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(4, 4), ContentScale.Crop, isMirrored = false)
+    state.startSession(identity, IntSize(8, 4), rotationDegrees = 0, isMirrored = false)
+    val source = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888).apply {
+      repeat(height) { y ->
+        setPixel(0, y, Color.YELLOW)
+        setPixel(1, y, Color.BLUE)
+        setPixel(2, y, Color.GREEN)
+        setPixel(3, y, Color.RED)
+      }
+    }
+
+    val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = false))
+
+    assertThat(frame.data.width).isEqualTo(4)
+    assertThat(frame.data.height).isEqualTo(4)
+    assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.YELLOW)
+    assertThat(frame.data.getPixel(1, 0)).isEqualTo(Color.BLUE)
+    assertThat(frame.data.getPixel(2, 0)).isEqualTo(Color.GREEN)
+    assertThat(frame.data.getPixel(3, 0)).isEqualTo(Color.RED)
+    frame.data.recycle()
+    source.recycle()
+  }
+
+  @Test
+  fun createSampledFrame_previewSizedSourceRemovesPlatformMirror() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(4, 4), ContentScale.Crop, isMirrored = false)
+    state.startSession(identity, IntSize(8, 4), rotationDegrees = 0, isMirrored = false)
+    val source = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888).apply {
+      repeat(height) { y ->
+        setPixel(0, y, Color.YELLOW)
+        setPixel(1, y, Color.BLUE)
+        setPixel(2, y, Color.GREEN)
+        setPixel(3, y, Color.RED)
+      }
+    }
+
+    val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = true))
+
+    assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.RED)
+    assertThat(frame.data.getPixel(1, 0)).isEqualTo(Color.GREEN)
+    assertThat(frame.data.getPixel(2, 0)).isEqualTo(Color.BLUE)
+    assertThat(frame.data.getPixel(3, 0)).isEqualTo(Color.YELLOW)
     frame.data.recycle()
     source.recycle()
   }

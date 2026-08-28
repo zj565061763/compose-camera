@@ -115,13 +115,6 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
-  internal fun currentSampledFrameSourceSize(sessionIdentity: CameraFrameTransformIdentity): IntSize? {
-    val config = _transformConfig.get()
-    if (config.sessionIdentity !== sessionIdentity) return null
-    return config.geometry?.contentSize
-  }
-
-  @MainThread
   internal fun createSampledFrame(
     source: Bitmap,
     sessionIdentity: CameraFrameTransformIdentity,
@@ -131,12 +124,25 @@ class CameraPreviewState internal constructor() {
     if (config.sessionIdentity !== sessionIdentity) return null
     val transformIdentity = config.transformIdentity ?: return null
     val geometry = config.geometry ?: return null
-    if (source.width != geometry.contentSize.width || source.height != geometry.contentSize.height) return null
+    val sourceSize = IntSize(source.width, source.height)
+    val sourceOffsetX: Float
+    val sourceOffsetY: Float
+    when (sourceSize) {
+      config.previewSize -> {
+        sourceOffsetX = 0f
+        sourceOffsetY = 0f
+      }
+      geometry.contentSize -> {
+        sourceOffsetX = geometry.offsetX
+        sourceOffsetY = geometry.offsetY
+      }
+      else -> return null
+    }
 
     val output = Bitmap.createBitmap(config.previewSize.width, config.previewSize.height, Bitmap.Config.ARGB_8888)
     Canvas(output).apply {
-      if (isPreviewMirrored) scale(-1f, 1f, geometry.offsetX + geometry.contentSize.width / 2f, geometry.offsetY + geometry.contentSize.height / 2f)
-      drawBitmap(source, geometry.offsetX, geometry.offsetY, Paint(Paint.FILTER_BITMAP_FLAG))
+      if (isPreviewMirrored) scale(-1f, 1f, sourceOffsetX + source.width / 2f, sourceOffsetY + source.height / 2f)
+      drawBitmap(source, sourceOffsetX, sourceOffsetY, Paint(Paint.FILTER_BITMAP_FLAG))
     }
     return CameraFrame.PreviewSampled(
       data = output,

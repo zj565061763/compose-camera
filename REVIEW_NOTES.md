@@ -65,6 +65,7 @@
 - 只有 `frameProcessor` 不是 `None` 时才创建名为 `CameraPreview-Analysis` 的专用单线程 executor 和三个 NV21 回调缓冲区。
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
+- `PreviewSampled` 按 `TextureView` 自然尺寸截图；截图已经等于预览区域时不得再次应用 `ContentScale` 裁剪，只有完整内容尺寸截图才按预览偏移裁切。
 - NV21 帧宽高必须为正偶数，所需字节数必须能安全表示为 `Int`，实际数据长度不得小于 `width × height × 3 / 2`。不符合条件的回调缓冲区直接归还，不创建 `CameraFrame`。
 - 每个相机回调缓冲区都必须在处理完成、被替换、被丢弃或 dispatcher 关闭时归还。
 - 帧回调异常和缓冲区归还异常必须保留正确的主异常及 suppressed 异常；致命 `Error` 不得作为业务异常吞掉。
