@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.ImageFormat
 import android.graphics.RectF
+import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.os.Handler
 import android.os.Looper
@@ -379,6 +380,27 @@ class CameraPreviewStateTest {
 
     assertThat(thrown).isSameInstanceAs(failure)
     assertThat(released).isTrue()
+  }
+
+  @Test
+  fun surfaceTextureReleaseCoordinator_waitsForExistingCameraUser() {
+    val surfaceTexture = SurfaceTexture(0)
+    val released = AtomicInteger()
+    val coordinator = SurfaceTextureReleaseCoordinator { released.incrementAndGet() }
+    coordinator.retain(surfaceTexture)
+
+    coordinator.requestRelease(surfaceTexture)
+    coordinator.requestRelease(surfaceTexture)
+
+    assertThat(released.get()).isEqualTo(0)
+
+    coordinator.releaseAfterUse(surfaceTexture)
+
+    assertThat(released.get()).isEqualTo(1)
+    coordinator.requestRelease(surfaceTexture)
+    assertThat(released.get()).isEqualTo(1)
+    assertThrows(IllegalStateException::class.java) { coordinator.retain(surfaceTexture) }
+    surfaceTexture.release()
   }
 
   @Test

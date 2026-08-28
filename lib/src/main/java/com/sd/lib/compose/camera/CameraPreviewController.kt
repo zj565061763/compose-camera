@@ -21,6 +21,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.WeakHashMap
 import kotlin.math.abs
 
 /** 管理一次 [CameraPreview] 会话和帧分发 */
@@ -64,6 +65,7 @@ internal class CameraPreviewController(
   private var _periodicAutoFocus: PeriodicAutoFocus? = null
   @Volatile
   private var _sessionIdentity: CameraFrameTransformIdentity? = null
+  private var _cameraSurfaceTexture: SurfaceTexture? = null
   private var _surfaceTexture: SurfaceTexture? = textureView.surfaceTexture.takeIf { textureView.isAvailable }
   private var _started = false
   @Volatile
@@ -94,7 +96,7 @@ internal class CameraPreviewController(
         _surfaceTexture = null
         updateCameraRequest(surface)
       } else {
-        surface.release()
+        postReleaseSurfaceTexture(surface)
       }
       return false
     }
@@ -141,8 +143,21 @@ internal class CameraPreviewController(
     postStopThenRelease(
       post = _cameraHandler::post,
       stop = ::stopCamera,
-      release = { surfaceTextureToRelease?.release() },
+      release = { surfaceTextureToRelease?.also(::requestSurfaceTextureRelease) },
     )
+  }
+
+  private fun postReleaseSurfaceTexture(surfaceTexture: SurfaceTexture) {
+    val release = Runnable { requestSurfaceTextureRelease(surfaceTexture) }
+    if (!_cameraHandler.post(release)) release.run()
+  }
+
+  private fun requestSurfaceTextureRelease(surfaceTexture: SurfaceTexture) {
+    try {
+      SURFACE_TEXTURE_RELEASE_COORDINATOR.requestRelease(surfaceTexture)
+    } catch (error: Exception) {
+      onError(error)
+    }
   }
 
   private fun startCameraIfReady(generation: Long, surfaceTexture: SurfaceTexture) {
@@ -215,6 +230,8 @@ internal class CameraPreviewController(
     val configuredFocusMode = configuredParameters.focusMode
     val bufferSize = IntSize(configuredSize.width, configuredSize.height)
     camera.setDisplayOrientation(displayOrientation)
+    SURFACE_TEXTURE_RELEASE_COORDINATOR.retain(surfaceTexture)
+    _cameraSurfaceTexture = surfaceTexture
     camera.setPreviewTexture(surfaceTexture)
     camera.setErrorCallback { errorCode, source ->
       if (!_closed && _camera === source) {
@@ -359,10 +376,12 @@ internal class CameraPreviewController(
     checkCameraOperationThread()
     val camera = _camera
     val sessionIdentity = _sessionIdentity
+    val cameraSurfaceTexture = _cameraSurfaceTexture
     _periodicAutoFocus?.close()
     _periodicAutoFocus = null
     _camera = null
     _sessionIdentity = null
+    _cameraSurfaceTexture = null
     _previewFrameDispatcher?.discardPending()
     _sampledFrameDispatcher?.stop()
     runCameraCleanupActions(
@@ -375,7 +394,13 @@ internal class CameraPreviewController(
         }
         if (sessionIdentity != null) add { callOnMainThread { onSessionClosed(sessionIdentity) } }
       },
-      finalAction = ::releaseCameraSessionPermit,
+      finalAction = {
+        try {
+          cameraSurfaceTexture?.also(SURFACE_TEXTURE_RELEASE_COORDINATOR::releaseAfterUse)
+        } finally {
+          releaseCameraSessionPermit()
+        }
+      },
     )?.also(onError)
   }
 
@@ -440,6 +465,7 @@ private const val AUTO_FOCUS_INTERVAL_MILLIS = 2_000L
 private const val CAMERA_SESSION_PERMIT_POLL_MILLIS = 100L
 // 避免重建时新会话在旧会话异步释放前打开相机
 private val CAMERA_SESSION_PERMIT = Semaphore(1, true)
+private val SURFACE_TEXTURE_RELEASE_COORDINATOR = SurfaceTextureReleaseCoordinator()
 
 internal fun postStopThenRelease(
   post: (Runnable) -> Boolean,
@@ -454,6 +480,62 @@ internal fun postStopThenRelease(
     }
   }
   if (!post(task)) release()
+}
+
+/** 延迟释放仍被相机会话使用的 SurfaceTexture。 */
+internal class SurfaceTextureReleaseCoordinator(
+  private val releaseSurfaceTexture: (SurfaceTexture) -> Unit = SurfaceTexture::release,
+) {
+  private val _lock = Any()
+  private val _states = WeakHashMap<SurfaceTexture, SurfaceTextureReleaseState>()
+
+  fun retain(surfaceTexture: SurfaceTexture) {
+    synchronized(_lock) {
+      val state = _states.getOrPut(surfaceTexture, ::SurfaceTextureReleaseState)
+      check(!state.releaseRequested && !state.released) { "SurfaceTexture has already been destroyed." }
+      state.useCount++
+    }
+  }
+
+  fun requestRelease(surfaceTexture: SurfaceTexture) {
+    val shouldRelease = synchronized(_lock) {
+      val state = _states.getOrPut(surfaceTexture, ::SurfaceTextureReleaseState)
+      if (state.releaseRequested || state.released) {
+        false
+      } else {
+        state.releaseRequested = true
+        if (state.useCount == 0) {
+          state.released = true
+          true
+        } else {
+          false
+        }
+      }
+    }
+    if (shouldRelease) releaseSurfaceTexture(surfaceTexture)
+  }
+
+  fun releaseAfterUse(surfaceTexture: SurfaceTexture) {
+    val shouldRelease = synchronized(_lock) {
+      val state = checkNotNull(_states[surfaceTexture]) { "SurfaceTexture is not retained." }
+      check(state.useCount > 0) { "SurfaceTexture use count is already zero." }
+      state.useCount--
+      if (state.useCount == 0 && state.releaseRequested) {
+        state.released = true
+        true
+      } else {
+        if (state.useCount == 0) _states.remove(surfaceTexture)
+        false
+      }
+    }
+    if (shouldRelease) releaseSurfaceTexture(surfaceTexture)
+  }
+}
+
+private class SurfaceTextureReleaseState {
+  var useCount = 0
+  var releaseRequested = false
+  var released = false
 }
 
 private fun <T> callOnHandlerThread(handler: Handler, action: () -> T): T {
