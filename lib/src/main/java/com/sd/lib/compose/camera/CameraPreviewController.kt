@@ -405,9 +405,6 @@ internal class CameraPreviewController(
     _shouldRun = false
     _requestGeneration++
     lifecycleOwner.lifecycle.removeObserver(_lifecycleObserver)
-    if (textureView.surfaceTextureListener === _surfaceTextureListener) {
-      textureView.surfaceTextureListener = null
-    }
     runCameraCleanupActions(
       actions = buildList {
         _previewFrameDispatcher?.also { dispatcher -> add(dispatcher::close) }
@@ -418,7 +415,16 @@ internal class CameraPreviewController(
           try {
             stopCamera()
           } finally {
-            _cameraThread.quitSafely()
+            try {
+              callOnMainThread {
+                if (textureView.surfaceTextureListener === _surfaceTextureListener) {
+                  textureView.surfaceTextureListener = null
+                }
+                _surfaceTexture = null
+              }
+            } finally {
+              _cameraThread.quitSafely()
+            }
           }
         }
       },
@@ -530,11 +536,12 @@ internal fun runCameraCleanupActions(
 internal class CameraFrameDispatcher(
   private val onFrame: (CameraFrame.Preview) -> Unit,
   private val onError: (Throwable) -> Unit,
+  executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+    Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME)
+  },
 ) : AutoCloseable {
   private val _lock = Any()
-  private val _executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-    Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME)
-  }
+  private val _executor = executor
   private var _processing = false
   private var _pending: PendingCameraFrame? = null
   private var _closed = false
@@ -560,7 +567,7 @@ internal class CameraFrameDispatcher(
       returnBuffer = returnBuffer,
     )
     var replaced: PendingCameraFrame? = null
-    var shouldSchedule = false
+    var schedulingFailure: Throwable? = null
     synchronized(_lock) {
       if (_closed) {
         replaced = frame
@@ -570,11 +577,19 @@ internal class CameraFrameDispatcher(
       } else {
         _processing = true
         _pending = frame
-        shouldSchedule = true
+        try {
+          _executor.execute(::drain)
+        } catch (error: Throwable) {
+          _processing = false
+          _pending = null
+          replaced = frame
+          schedulingFailure = error
+        }
       }
     }
-    replaced?.also { dropped -> reportOrThrow(releaseFrameBuffer(dropped)) }
-    if (shouldSchedule) _executor.execute(::drain)
+    replaced?.also { dropped ->
+      reportOrThrow(releaseFrameBuffer(dropped, schedulingFailure))
+    }
   }
 
   private fun drain() {

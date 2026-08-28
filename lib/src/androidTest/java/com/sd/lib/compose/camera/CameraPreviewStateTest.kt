@@ -15,6 +15,8 @@ import androidx.compose.ui.unit.IntSize
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -467,6 +469,33 @@ class CameraPreviewStateTest {
     assertThat(callbackCount.get()).isEqualTo(1)
     assertThat(returned).containsExactly(1, 2)
     assertThat(error.get()).isNull()
+  }
+
+  @Test
+  fun frameDispatcher_executorRejectionReturnsFrameAndReportsError() {
+    val executor = Executors.newSingleThreadExecutor().also { it.shutdown() }
+    val callback = CountDownLatch(1)
+    val returned = CountDownLatch(1)
+    val receivedError = AtomicReference<Throwable?>()
+    val dispatcher = CameraFrameDispatcher(
+      onFrame = { callback.countDown() },
+      onError = receivedError::set,
+      executor = executor,
+    )
+
+    dispatcher.offer(
+      data = ByteArray(6),
+      width = 2,
+      height = 2,
+      rotationDegrees = 0,
+      transformIdentity = CameraFrameTransformIdentity(),
+      returnBuffer = { returned.countDown() },
+    )
+
+    assertThat(returned.await(1, TimeUnit.SECONDS)).isTrue()
+    assertThat(callback.await(100, TimeUnit.MILLISECONDS)).isFalse()
+    assertThat(receivedError.get()).isInstanceOf(RejectedExecutionException::class.java)
+    dispatcher.close()
   }
 
   @Test

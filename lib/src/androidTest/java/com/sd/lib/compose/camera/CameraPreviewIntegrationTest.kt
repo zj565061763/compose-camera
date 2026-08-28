@@ -515,6 +515,43 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
+  fun close_removesSurfaceListenerAfterCameraThreadStops() {
+    val initialCameraThreads = activeCameraThreads()
+    val lifecycleOwner = FakeLifecycleOwner()
+    val receivedError = AtomicReference<Throwable?>()
+    lateinit var textureView: TextureView
+
+    _composeRule.runOnUiThread {
+      textureView = TextureView(_composeRule.activity)
+      val controller = CameraPreviewController(
+        lifecycleOwner = lifecycleOwner,
+        textureView = textureView,
+        cameraId = null,
+        displayRotation = Surface.ROTATION_0,
+        previewViewSize = IntSize(240, 240),
+        transformIdentityProvider = { null },
+        onSessionStarted = { _, _, _, _ -> error("Camera session must not start.") },
+        frameProcessor = ActiveFrameProcessor.None,
+        captureSampledFrame = { _, _ -> null },
+        onError = receivedError::set,
+        onSessionClosed = {},
+      )
+      controller.start()
+      val listener = checkNotNull(textureView.surfaceTextureListener)
+
+      controller.close()
+
+      assertThat(textureView.surfaceTextureListener).isSameInstanceAs(listener)
+    }
+
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      (activeCameraThreads() - initialCameraThreads).isEmpty()
+    }
+    _composeRule.runOnUiThread { assertThat(textureView.surfaceTextureListener).isNull() }
+    assertThat(receivedError.get()).isNull()
+  }
+
+  @Test
   fun destroyedLifecycleOwner_releasesSessionAndWorkerThreads() {
     assumeCameraAvailable()
     val initialCameraThreads = activeCameraThreads()
