@@ -99,13 +99,14 @@ class CameraPreviewState internal constructor() {
     frame: CameraFrame.PreviewSampled,
     config: PreviewTransformConfig,
   ): Matrix? {
-    if (frame.rotationDegrees != 0 || config.geometry == null) return null
+    val geometry = config.geometry ?: return null
+    if (frame.rotationDegrees != 0) return null
     if (frame.data.width != config.previewSize.width || frame.data.height != config.previewSize.height) return null
     if (!config.isMirrored) return Matrix()
     return Matrix().apply {
       setValues(
         floatArrayOf(
-          -1f, 0f, config.previewSize.width.toFloat(),
+          -1f, 0f, geometry.offsetX * 2 + geometry.contentSize.width,
           0f, 1f, 0f,
           0f, 0f, 1f,
         ),
@@ -134,7 +135,7 @@ class CameraPreviewState internal constructor() {
 
     val output = Bitmap.createBitmap(config.previewSize.width, config.previewSize.height, Bitmap.Config.ARGB_8888)
     Canvas(output).apply {
-      if (isPreviewMirrored) scale(-1f, 1f, config.previewSize.width / 2f, config.previewSize.height / 2f)
+      if (isPreviewMirrored) scale(-1f, 1f, geometry.offsetX + geometry.contentSize.width / 2f, geometry.offsetY + geometry.contentSize.height / 2f)
       drawBitmap(source, geometry.offsetX, geometry.offsetY, Paint(Paint.FILTER_BITMAP_FLAG))
     }
     return CameraFrame.PreviewSampled(

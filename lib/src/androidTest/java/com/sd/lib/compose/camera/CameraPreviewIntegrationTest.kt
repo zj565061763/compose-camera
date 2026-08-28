@@ -24,6 +24,7 @@ import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assume.assumeTrue
 import org.junit.Rule
@@ -175,6 +176,39 @@ class CameraPreviewIntegrationTest {
     _composeRule.waitForIdle()
 
     assertThat(updatedFrame.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(error.get()).isNull()
+    assertThat(state.currentSessionIdentity()).isSameInstanceAs(sessionIdentity)
+  }
+
+  @Test
+  fun sampledFrameProcessorChange_updatesIntervalAndCallbackWithoutRestartingSession() {
+    assumeCameraAvailable()
+    val oldFrameCount = AtomicInteger()
+    val updatedFrame = CountDownLatch(1)
+    val processor = mutableStateOf<FrameProcessor>(
+      FrameProcessor.PreviewSampled(intervalMillis = 60_000) { oldFrameCount.incrementAndGet() },
+    )
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(240.dp),
+        state = state,
+        onError = error::set,
+        frameProcessor = processor.value,
+      )
+    }
+    waitForPreview(state, error)
+    val sessionIdentity = checkNotNull(state.currentSessionIdentity())
+
+    _composeRule.runOnIdle {
+      processor.value = FrameProcessor.PreviewSampled(intervalMillis = 1) { updatedFrame.countDown() }
+    }
+    _composeRule.waitForIdle()
+
+    assertThat(updatedFrame.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(oldFrameCount.get()).isEqualTo(0)
     assertThat(error.get()).isNull()
     assertThat(state.currentSessionIdentity()).isSameInstanceAs(sessionIdentity)
   }
