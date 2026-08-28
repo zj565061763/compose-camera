@@ -169,6 +169,27 @@ fun CameraPreview(
     }
   }
 
+  DisposableEffect(state, currentTextureView, errorDispatcher) {
+    if (currentTextureView == null) {
+      onDispose { }
+    } else {
+      val takePictureAction: (CameraMirrorMode) -> Bitmap? = { pictureMirrorMode ->
+        try {
+          capturePreviewPicture(
+            state = state,
+            mirrorMode = pictureMirrorMode,
+            captureBitmap = { width, height -> currentTextureView.getBitmap(width, height) },
+          )
+        } catch (error: Exception) {
+          errorDispatcher.dispatch(error)
+          null
+        }
+      }
+      state.attachTakePictureAction(takePictureAction)
+      onDispose { state.detachTakePictureAction(takePictureAction) }
+    }
+  }
+
   CameraPreviewTextureView(
     modifier = modifier,
     state = state,
@@ -232,6 +253,24 @@ internal fun capturePreviewSampledFrame(
   return try {
     state.createSampledFrame(source, request).also { frame ->
       sourceTransferred = frame?.data === source
+    }
+  } finally {
+    if (!sourceTransferred) source.recycle()
+  }
+}
+
+@MainThread
+internal fun capturePreviewPicture(
+  state: CameraPreviewState,
+  mirrorMode: CameraMirrorMode,
+  captureBitmap: (Int, Int) -> Bitmap?,
+): Bitmap? {
+  val request = state.createPictureRequest(mirrorMode) ?: return null
+  val source = captureBitmap(request.captureSize.width, request.captureSize.height) ?: return null
+  var sourceTransferred = false
+  return try {
+    state.createPreviewBitmap(source, request).also { bitmap ->
+      sourceTransferred = bitmap === source
     }
   } finally {
     if (!sourceTransferred) source.recycle()
@@ -310,12 +349,4 @@ internal class MainThreadErrorSubscription(
 
 private fun List<CameraDeviceInfo>.selectedCameraDevice(cameraId: String?): CameraDeviceInfo? {
   return if (cameraId == null) firstOrNull() else firstOrNull { device -> device.cameraId == cameraId }
-}
-
-private fun CameraMirrorMode.isMirrored(isFrontFacing: Boolean): Boolean {
-  return when (this) {
-    CameraMirrorMode.AUTO -> isFrontFacing
-    CameraMirrorMode.ON -> true
-    CameraMirrorMode.OFF -> false
-  }
 }

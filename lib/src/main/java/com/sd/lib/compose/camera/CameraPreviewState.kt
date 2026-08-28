@@ -33,9 +33,21 @@ class CameraPreviewState internal constructor() {
   private val _previewResolution = mutableStateOf(IntSize.Zero)
   private val _previewTransformRevision = mutableIntStateOf(0)
   private val _retryGeneration = mutableIntStateOf(0)
+  private var _takePictureAction: ((CameraMirrorMode) -> Bitmap?)? = null
 
   /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero]。 */
   val previewResolution: State<IntSize> = _previewResolution
+
+  /**
+   * 截取当前预览区域，并按照 [mirrorMode] 决定返回图片的镜像状态。
+   *
+   * 返回的图片已经应用显示旋转和 `ContentScale`，不包含预览上层内容，由调用方负责回收。
+   * 预览尚未产生有效帧、已经离开组合或发生普通截图异常时返回 `null`；截图异常同时通过 [CameraPreview] 的 `onError` 报告。
+   */
+  @MainThread
+  fun takePicture(mirrorMode: CameraMirrorMode = CameraMirrorMode.AUTO): Bitmap? {
+    return _takePictureAction?.invoke(mirrorMode)
+  }
 
   /** 在外部条件恢复后关闭并重新创建当前相机会话 */
   @MainThread
@@ -122,13 +134,38 @@ class CameraPreviewState internal constructor() {
   internal fun createPreviewSampleRequest(
     sessionIdentity: CameraFrameTransformIdentity,
     isPreviewMirrored: Boolean,
-  ): PreviewSampleRequest? {
+  ): PreviewBitmapRequest? {
     val config = _transformConfig.get()
     if (
       config.sessionIdentity !== sessionIdentity ||
       config.isPreviewMirrored != isPreviewMirrored ||
       !config.isPreviewFrameAvailable
     ) return null
+    return createPreviewBitmapRequest(
+      config = config,
+      sessionIdentity = sessionIdentity,
+      shouldMirror = config.isPreviewMirrored,
+    )
+  }
+
+  @MainThread
+  internal fun createPictureRequest(mirrorMode: CameraMirrorMode): PreviewBitmapRequest? {
+    val config = _transformConfig.get()
+    val sessionIdentity = config.sessionIdentity ?: return null
+    if (!config.isPreviewFrameAvailable) return null
+    val targetMirrored = mirrorMode.isMirrored(config.isPreviewMirrored)
+    return createPreviewBitmapRequest(
+      config = config,
+      sessionIdentity = sessionIdentity,
+      shouldMirror = config.isPreviewMirrored != targetMirrored,
+    )
+  }
+
+  private fun createPreviewBitmapRequest(
+    config: PreviewTransformConfig,
+    sessionIdentity: CameraFrameTransformIdentity,
+    shouldMirror: Boolean,
+  ): PreviewBitmapRequest? {
     val transformIdentity = config.transformIdentity ?: return null
     val geometry = config.geometry ?: return null
     val normalizedRotation = normalizeRotation(config.rotationDegrees)
@@ -145,7 +182,7 @@ class CameraPreviewState internal constructor() {
       (geometry.contentSize.width * captureScale).roundToInt().coerceAtLeast(1),
       (geometry.contentSize.height * captureScale).roundToInt().coerceAtLeast(1),
     )
-    return PreviewSampleRequest(
+    return PreviewBitmapRequest(
       sessionIdentity = sessionIdentity,
       transformIdentity = transformIdentity,
       captureSize = captureSize,
@@ -156,15 +193,28 @@ class CameraPreviewState internal constructor() {
         geometry.offsetX + geometry.contentSize.width,
         geometry.offsetY + geometry.contentSize.height,
       ),
-      isPreviewMirrored = config.isPreviewMirrored,
+      shouldMirror = shouldMirror,
     )
   }
 
   @MainThread
   internal fun createSampledFrame(
     source: Bitmap,
-    request: PreviewSampleRequest,
+    request: PreviewBitmapRequest,
   ): CameraFrame.PreviewSampled? {
+    val output = createPreviewBitmap(source, request) ?: return null
+    return CameraFrame.PreviewSampled(
+      data = output,
+      rotationDegrees = 0,
+      transformIdentity = request.transformIdentity,
+    )
+  }
+
+  @MainThread
+  internal fun createPreviewBitmap(
+    source: Bitmap,
+    request: PreviewBitmapRequest,
+  ): Bitmap? {
     val config = _transformConfig.get()
     if (
       config.sessionIdentity !== request.sessionIdentity ||
@@ -173,7 +223,7 @@ class CameraPreviewState internal constructor() {
     ) return null
 
     val previewBounds = Rect(0f, 0f, request.previewSize.width.toFloat(), request.previewSize.height.toFloat())
-    val isDirect = !request.isPreviewMirrored && request.captureSize == request.previewSize &&
+    val isDirect = !request.shouldMirror && request.captureSize == request.previewSize &&
       request.contentBounds == previewBounds
     val output = if (isDirect) {
       source
@@ -181,7 +231,7 @@ class CameraPreviewState internal constructor() {
       Bitmap.createBitmap(request.previewSize.width, request.previewSize.height, Bitmap.Config.ARGB_8888).also { bitmap ->
         try {
           Canvas(bitmap).apply {
-            if (request.isPreviewMirrored) {
+            if (request.shouldMirror) {
               scale(-1f, 1f, request.previewSize.width / 2f, request.previewSize.height / 2f)
             }
             val destination = request.contentBounds
@@ -198,11 +248,17 @@ class CameraPreviewState internal constructor() {
         }
       }
     }
-    return CameraFrame.PreviewSampled(
-      data = output,
-      rotationDegrees = 0,
-      transformIdentity = request.transformIdentity,
-    )
+    return output
+  }
+
+  @MainThread
+  internal fun attachTakePictureAction(action: (CameraMirrorMode) -> Bitmap?) {
+    _takePictureAction = action
+  }
+
+  @MainThread
+  internal fun detachTakePictureAction(action: (CameraMirrorMode) -> Bitmap?) {
+    if (_takePictureAction === action) _takePictureAction = null
   }
 
   @MainThread
@@ -328,6 +384,7 @@ class CameraPreviewState internal constructor() {
 
   @MainThread
   internal fun reset() {
+    _takePictureAction = null
     _transformConfig.set(PreviewTransformConfig())
     _previewTransformRevision.intValue++
     _previewResolution.value = IntSize.Zero
@@ -348,13 +405,13 @@ private data class PreviewTransformConfig(
   val isPreviewFrameAvailable: Boolean = false,
 )
 
-internal data class PreviewSampleRequest(
+internal data class PreviewBitmapRequest(
   val sessionIdentity: CameraFrameTransformIdentity,
   val transformIdentity: CameraFrameTransformIdentity,
   val captureSize: IntSize,
   val previewSize: IntSize,
   val contentBounds: Rect,
-  val isPreviewMirrored: Boolean,
+  val shouldMirror: Boolean,
 )
 
 internal data class PreviewGeometry(

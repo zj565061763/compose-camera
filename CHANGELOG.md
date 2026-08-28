@@ -6,6 +6,7 @@
 
 - 新增 `FrameProcessor`，支持直接接收 NV21 帧或按间隔截取预览区域。
 - 新增可覆盖的 `displayRotation`，默认自动监听当前显示器旋转。
+- 新增 `CameraPreviewState.takePicture()`，支持按指定 `CameraMirrorMode` 截取当前预览区域。
 
 ### ♻️ Changes
 
@@ -17,6 +18,7 @@
 
 ### 🐛 Bug Fixes
 
+- 修复会话重建时首个 `SurfaceTexture` 更新可能被漏掉或误认旧缓冲，导致首帧矩阵跳跃的问题。
 - 修复前置摄像头原始帧旋转方向和预览显示方向混用的问题。
 - 不支持连续对焦但支持单次自动对焦时，每两秒重新触发一次对焦。
 - 启用帧回调时校验设备实际采用的预览格式，避免把异常格式误当作 NV21 帧处理。

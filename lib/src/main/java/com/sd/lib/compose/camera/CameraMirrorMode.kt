@@ -11,3 +11,11 @@ enum class CameraMirrorMode {
   /** 始终不做镜像 */
   OFF,
 }
+
+internal fun CameraMirrorMode.isMirrored(isFrontFacing: Boolean): Boolean {
+  return when (this) {
+    CameraMirrorMode.AUTO -> isFrontFacing
+    CameraMirrorMode.ON -> true
+    CameraMirrorMode.OFF -> false
+  }
+}

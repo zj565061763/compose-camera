@@ -67,7 +67,8 @@ internal class CameraPreviewController(
   @Volatile
   private var _sessionIdentity: CameraFrameTransformIdentity? = null
   @Volatile
-  private var _previewStartedSessionIdentity: CameraFrameTransformIdentity? = null
+  private var _previewFrameGateSessionIdentity: CameraFrameTransformIdentity? = null
+  @Volatile
   private var _cameraSurfaceTexture: SurfaceTexture? = null
   private var _surfaceTexture: SurfaceTexture? = textureView.surfaceTexture.takeIf { textureView.isAvailable }
   private var _started = false
@@ -105,8 +106,12 @@ internal class CameraPreviewController(
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-      val sessionIdentity = _previewStartedSessionIdentity ?: return
-      if (!_closed && _shouldRun && _sessionIdentity === sessionIdentity) {
+      val sessionIdentity = _previewFrameGateSessionIdentity ?: return
+      if (
+        !_closed && _shouldRun &&
+        _cameraSurfaceTexture === surface &&
+        _sessionIdentity === sessionIdentity
+      ) {
         onPreviewFrameAvailable(sessionIdentity)
       }
     }
@@ -279,11 +284,27 @@ internal class CameraPreviewController(
       return
     }
     _sampledFrameDispatcher?.start()
+    drainPendingPreviewFrame(surfaceTexture)
+    if (_camera !== camera || !isCurrentStartRequest(generation)) {
+      stopCamera()
+      return
+    }
+    // 先清空旧生产者尚未消费的更新，再启用新会话首帧门控，避免漏掉同步提交的首帧
+    _previewFrameGateSessionIdentity = sessionIdentity
     camera.startPreview()
-    if (_camera === camera && isCurrentStartRequest(generation)) {
-      _previewStartedSessionIdentity = sessionIdentity
+    if (_camera !== camera || !isCurrentStartRequest(generation)) {
+      stopCamera()
+      return
     }
     if (configuredFocusMode == Camera.Parameters.FOCUS_MODE_AUTO) startPeriodicAutoFocus(camera, generation)
+  }
+
+  private fun drainPendingPreviewFrame(surfaceTexture: SurfaceTexture) {
+    callOnMainThread {
+      if (textureView.isAvailable && textureView.surfaceTexture === surfaceTexture) {
+        textureView.getBitmap(1, 1)?.recycle()
+      }
+    }
   }
 
   private fun startPeriodicAutoFocus(camera: Camera, generation: Long) {
@@ -392,7 +413,7 @@ internal class CameraPreviewController(
     _periodicAutoFocus = null
     _camera = null
     _sessionIdentity = null
-    _previewStartedSessionIdentity = null
+    _previewFrameGateSessionIdentity = null
     _cameraSurfaceTexture = null
     _previewFrameDispatcher?.discardPending()
     _sampledFrameDispatcher?.stop()

@@ -5,6 +5,7 @@ package com.sd.lib.compose.camera
 import android.Manifest
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
@@ -135,6 +136,40 @@ class CameraPreviewIntegrationTest {
     assertThat(result.height).isEqualTo(result.width)
     assertThat(result.rotationDegrees).isEqualTo(0)
     assertThat(result.threadName).isEqualTo(CAMERA_ANALYSIS_THREAD_NAME)
+  }
+
+  @Test
+  fun cameraPreview_takePictureReturnsOwnedPreviewBitmapAndDetachesWithPreview() {
+    assumeCameraAvailable()
+    val showPreview = mutableStateOf(true)
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+
+    _composeRule.setContent {
+      if (showPreview.value) {
+        CameraPreview(
+          modifier = Modifier.size(240.dp),
+          state = state,
+          onError = error::set,
+        )
+      }
+    }
+    waitForPreview(state, error)
+
+    lateinit var bitmap: Bitmap
+    _composeRule.runOnIdle {
+      bitmap = checkNotNull(state.takePicture(CameraMirrorMode.OFF))
+    }
+
+    assertThat(error.get()).isNull()
+    assertThat(bitmap.width).isGreaterThan(0)
+    assertThat(bitmap.height).isEqualTo(bitmap.width)
+    assertThat(bitmap.isRecycled).isFalse()
+    bitmap.recycle()
+
+    _composeRule.runOnIdle { showPreview.value = false }
+    _composeRule.waitForIdle()
+    _composeRule.runOnIdle { assertThat(state.takePicture()).isNull() }
   }
 
   @Test
@@ -500,14 +535,22 @@ class CameraPreviewIntegrationTest {
       }
     }
     waitForPreview(state, error)
-    val initialSessionIdentity = checkNotNull(state.currentSessionIdentity())
+    var previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
 
-    _composeRule.runOnUiThread {
-      lifecycleOwner.stop()
-      lifecycleOwner.start()
-    }
-    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
-      error.get() != null || state.currentSessionIdentity()?.let { it !== initialSessionIdentity } == true
+    repeat(3) {
+      _composeRule.runOnUiThread {
+        lifecycleOwner.stop()
+        lifecycleOwner.start()
+      }
+      _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+        val currentSessionIdentity = state.currentSessionIdentity()
+        error.get() != null || (
+          currentSessionIdentity != null &&
+            currentSessionIdentity !== previousSessionIdentity &&
+            state.createCurrentTextureViewTransform(currentSessionIdentity) != null
+        )
+      }
+      previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
     }
 
     assertThat(error.get()).isNull()

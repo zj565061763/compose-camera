@@ -228,6 +228,129 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun takePicture_usesAttachedActionAndResetDetachesIt() {
+    val state = CameraPreviewState()
+    val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+    var receivedMirrorMode: CameraMirrorMode? = null
+    val action: (CameraMirrorMode) -> Bitmap? = { mirrorMode ->
+      receivedMirrorMode = mirrorMode
+      bitmap
+    }
+    state.attachTakePictureAction(action)
+
+    val result = state.takePicture(CameraMirrorMode.OFF)
+
+    assertThat(result).isSameInstanceAs(bitmap)
+    assertThat(receivedMirrorMode).isEqualTo(CameraMirrorMode.OFF)
+    state.reset()
+    assertThat(state.takePicture()).isNull()
+    bitmap.recycle()
+  }
+
+  @Test
+  fun capturePreviewPicture_appliesRequestedMirrorModeToPixels() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(4, 2), ContentScale.FillBounds, isMirrored = true)
+    state.startSession(
+      sessionIdentity = identity,
+      bufferSize = IntSize(4, 2),
+      rotationDegrees = 0,
+      isPreviewMirrored = true,
+      isMirrored = true,
+    )
+    state.markPreviewFrameAvailable(identity)
+
+    fun capture(mirrorMode: CameraMirrorMode): Bitmap {
+      return checkNotNull(
+        capturePreviewPicture(
+          state = state,
+          mirrorMode = mirrorMode,
+          captureBitmap = { width, height ->
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+              repeat(height) { y ->
+                setPixel(0, y, Color.YELLOW)
+                setPixel(1, y, Color.BLUE)
+                setPixel(2, y, Color.GREEN)
+                setPixel(3, y, Color.RED)
+              }
+            }
+          },
+        ),
+      )
+    }
+
+    val auto = capture(CameraMirrorMode.AUTO)
+    val on = capture(CameraMirrorMode.ON)
+    val off = capture(CameraMirrorMode.OFF)
+
+    assertThat((0 until 4).map { x -> auto.getPixel(x, 0) })
+      .containsExactly(Color.YELLOW, Color.BLUE, Color.GREEN, Color.RED).inOrder()
+    assertThat((0 until 4).map { x -> on.getPixel(x, 0) })
+      .containsExactly(Color.YELLOW, Color.BLUE, Color.GREEN, Color.RED).inOrder()
+    assertThat((0 until 4).map { x -> off.getPixel(x, 0) })
+      .containsExactly(Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW).inOrder()
+    auto.recycle()
+    on.recycle()
+    off.recycle()
+  }
+
+  @Test
+  fun capturePreviewPicture_rearCameraOnMirrorsPixels() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(2, 2), ContentScale.FillBounds, isMirrored = false)
+    state.startSession(
+      sessionIdentity = identity,
+      bufferSize = IntSize(2, 2),
+      rotationDegrees = 0,
+      isPreviewMirrored = false,
+      isMirrored = false,
+    )
+    state.markPreviewFrameAvailable(identity)
+
+    val bitmap = checkNotNull(
+      capturePreviewPicture(
+        state = state,
+        mirrorMode = CameraMirrorMode.ON,
+        captureBitmap = { width, height ->
+          Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.YELLOW)
+            repeat(height) { y -> setPixel(1, y, Color.RED) }
+          }
+        },
+      ),
+    )
+
+    assertThat(bitmap.getPixel(0, 0)).isEqualTo(Color.RED)
+    assertThat(bitmap.getPixel(1, 0)).isEqualTo(Color.YELLOW)
+    bitmap.recycle()
+  }
+
+  @Test
+  fun capturePreviewPicture_layoutChangeDuringCaptureDropsAndRecyclesSource() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(4, 4), ContentScale.Crop, isMirrored = false)
+    state.startSession(identity, IntSize(4, 4), rotationDegrees = 0, isMirrored = false)
+    state.markPreviewFrameAvailable(identity)
+    lateinit var source: Bitmap
+
+    val result = capturePreviewPicture(
+      state = state,
+      mirrorMode = CameraMirrorMode.OFF,
+      captureBitmap = { width, height ->
+        Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { source = it }
+        state.updatePreviewLayout(IntSize(3, 3), ContentScale.Crop, isMirrored = false)
+        source
+      },
+    )
+
+    assertThat(result).isNull()
+    assertThat(source.isRecycled).isTrue()
+  }
+
+  @Test
   fun capturePreviewSampledFrame_usesCurrentContentSizeAndCropsExplicitly() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()

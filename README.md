@@ -24,6 +24,26 @@ CameraPreview(
 )
 ```
 
+## 拍照
+
+通过传给 `CameraPreview` 的 `CameraPreviewState` 截取当前预览区域。返回图片已经应用显示旋转、`ContentScale` 和指定镜像模式，不包含预览上层内容；预览尚未产生有效帧或普通截图失败时返回 `null`，截图异常同时通过 `CameraPreview.onError` 报告。此方法必须在主线程调用，返回的 `Bitmap` 由调用方负责回收：
+
+```kotlin
+val state = rememberCameraPreviewState()
+
+CameraPreview(state = state)
+
+Button(
+  onClick = {
+    state.takePicture(CameraMirrorMode.AUTO)?.also { bitmap ->
+      // 使用并持有 bitmap，结束后调用 bitmap.recycle()
+    }
+  },
+) {
+  Text("拍照")
+}
+```
+
 # Changelog
 
 版本更新记录：[CHANGELOG.md](CHANGELOG.md)

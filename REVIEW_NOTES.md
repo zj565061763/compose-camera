@@ -20,7 +20,8 @@
 - `CameraFrame.Preview.data` 和 `CameraFrame.PreviewSampled.data` 只保证在同步回调期间有效。允许跨回调保留的是数据副本、独立 `Bitmap` 或轻量 `CameraFrameTransformToken`。
 - `CameraFrame.Preview.toBitmap()` 返回未旋转的独立图片，转换失败时返回 `null`，不抛出普通转换异常。
 - `CameraFrame.PreviewSampled.data` 已应用显示旋转和 `ContentScale`，未由相机内容覆盖的区域透明；不包含平台镜像、目标镜像或预览上层内容，`rotationDegrees` 固定为 `0`。
-- `mirrorMode` 只影响预览和坐标矩阵，不修改帧数据。
+- `CameraPreview.mirrorMode` 只影响预览和坐标矩阵，不修改帧数据；`CameraPreviewState.takePicture(mirrorMode)` 的参数只决定返回 Bitmap 的镜像状态。
+- `CameraPreviewState.takePicture()` 必须在主线程调用；返回图片已应用显示旋转、`ContentScale` 和指定镜像模式，不包含预览上层内容。预览未产生有效帧、已离开组合或发生普通截图异常时返回 `null`，截图异常同时通过 `CameraPreview.onError` 报告；成功返回的独立 Bitmap 由调用方负责回收。
 - `displayRotation == null` 时监听当前 View 所在显示器的旋转；显式值必须是 `Surface.ROTATION_*`。
 - 库 Manifest 声明 `CAMERA` 权限和可选相机硬件；应用仍负责运行时授权，并且只能在授权后组合 `CameraPreview`。
 
@@ -41,7 +42,8 @@
 - Surface 销毁回调必须转移释放责任，先在相机线程停止会话，再释放 `SurfaceTexture`。
 - 显示旋转、cameraId、帧处理模式、retry generation 或相关设备快照变化会重建会话。
 - 普通布局尺寸、`contentScale`、镜像模式、处理间隔、用户 lambda 或 `onError` lambda 实例变化不得重复打开相机。
-- 会话重建时保留上一帧已经应用的显示矩阵；新会话的内容矩阵和额外镜像只能在首个 `onSurfaceTextureUpdated` 回调中同步切换，禁止把旧帧短暂恢复为 identity 或提前套用新会话矩阵。
+- 会话重建时保留上一帧已经应用的显示矩阵；启动新预览前必须在主线程消费旧生产者尚未处理的 TextureView 更新，再启用新会话首帧门控。新会话的内容矩阵和额外镜像只能在首个属于当前 Surface 和会话的 `onSurfaceTextureUpdated` 回调中同步切换，禁止遗漏首帧、误认旧缓冲、把旧帧短暂恢复为 identity 或提前套用新会话矩阵。
+- `CameraPreviewState.takePicture()` 的截图入口只在对应 `CameraPreview` 组合期间有效，退出组合后必须解除，不能继续访问已经释放的 TextureView。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
 - Controller 在 `CameraPreview-Camera` 专用线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作。
 - Controller 只释放自己打开的相机和创建的工作线程，不得影响进程内其他相机使用方。
@@ -66,9 +68,10 @@
 - 只有 `frameProcessor` 不是 `None` 时才创建名为 `CameraPreview-Analysis` 的专用单线程 executor 和三个 NV21 回调缓冲区。
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
-- `TextureView.getBitmap()` 不会把 `setTransform()` 的内容矩阵烘入 Bitmap。`PreviewSampled` 必须按当前 geometry 的内容比例截图，再显式绘制到浮点 content bounds 完成偏移和裁剪，禁止依赖平台 readback 应用显示矩阵。
+- `TextureView.getBitmap()` 不会把 `setTransform()` 的内容矩阵烘入 Bitmap。`PreviewSampled` 和 `takePicture()` 必须按当前 geometry 的内容比例截图，再显式绘制到浮点 content bounds 完成偏移和裁剪，禁止依赖平台 readback 应用显示矩阵。
 - 截图源按统一比例限制在旋转后的相机缓冲区尺寸以内，避免为已经被相机缓冲区限制的内容创建超大 Bitmap；geometry 为 identity 且不需要移除平台镜像时直接转交截图 Bitmap，禁止无条件复制第二张预览尺寸 Bitmap。
 - 采样请求、截图尺寸、content bounds 和 transform token 必须来自同一份状态快照；布局或会话在截图期间变化时丢弃结果。
+- `PreviewSampled` 始终移除平台镜像；`takePicture()` 则比较平台镜像和参数要求的目标镜像，只在两者不同时翻转返回像素。
 - NV21 帧宽高必须为正偶数，所需字节数必须能安全表示为 `Int`，实际数据长度不得小于 `width × height × 3 / 2`。不符合条件的回调缓冲区直接归还，不创建 `CameraFrame`。
 - 每个相机回调缓冲区都必须在处理完成、被替换、被丢弃或 dispatcher 关闭时归还。
 - 帧回调异常和缓冲区归还异常必须保留正确的主异常及 suppressed 异常；致命 `Error` 不得作为业务异常吞掉。
@@ -85,7 +88,7 @@
 
 ## 测试与验证
 
-- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、token 失效、尺寸选择、对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发和异常安全清理。
+- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、拍照像素与所有权、token 失效、尺寸选择、对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发和异常安全清理。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和工作线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
