@@ -58,9 +58,8 @@ fun CameraPreview(
       "displayRotation must be a Surface.ROTATION_* value."
     }
   }
-  val context = LocalContext.current
   val lifecycleOwner = LocalLifecycleOwner.current
-  val textureView = remember(context) { TextureView(context) }
+  var textureView by remember { mutableStateOf<TextureView?>(null) }
 
   val currentFrameProcessor by rememberUpdatedState(frameProcessor)
   val currentOnError by rememberUpdatedState(onError)
@@ -103,9 +102,10 @@ fun CameraPreview(
     }
   }
 
+  val currentTextureView = textureView
   DisposableEffect(
     lifecycleOwner,
-    textureView,
+    currentTextureView,
     state,
     cameraId,
     effectiveDisplayRotation,
@@ -115,12 +115,12 @@ fun CameraPreview(
     hasLoadedCameraDevices,
     cameraDeviceKey,
   ) {
-    if (!hasValidPreviewSize || !hasLoadedCameraDevices) {
+    if (currentTextureView == null || !hasValidPreviewSize || !hasLoadedCameraDevices) {
       onDispose { }
     } else {
       val controller = CameraPreviewController(
         lifecycleOwner = lifecycleOwner,
-        textureView = textureView,
+        textureView = currentTextureView,
         cameraId = cameraId,
         displayRotation = effectiveDisplayRotation,
         previewViewSize = previewSize,
@@ -150,7 +150,7 @@ fun CameraPreview(
         },
         captureSampledFrame = captureSampledFrame@ { sessionIdentity, isPreviewMirrored ->
           val sourceSize = state.currentSampledFrameSourceSize(sessionIdentity) ?: return@captureSampledFrame null
-          val source = textureView.getBitmap(sourceSize.width, sourceSize.height) ?: return@captureSampledFrame null
+          val source = currentTextureView.getBitmap(sourceSize.width, sourceSize.height) ?: return@captureSampledFrame null
           try {
             state.createSampledFrame(source, sessionIdentity, isPreviewMirrored)
           } finally {
@@ -170,10 +170,10 @@ fun CameraPreview(
 
   CameraPreviewTextureView(
     modifier = modifier,
-    textureView = textureView,
     state = state,
     contentScale = contentScale,
     needsAdditionalMirror = needsAdditionalMirror,
+    onTextureViewCreated = { view -> textureView = view },
     onSizeChanged = { size ->
       previewSize = size
       state.updatePreviewLayout(size, contentScale, targetMirrored)
@@ -184,10 +184,10 @@ fun CameraPreview(
 @Composable
 private fun CameraPreviewTextureView(
   modifier: Modifier,
-  textureView: TextureView,
   state: CameraPreviewState,
   contentScale: ContentScale,
   needsAdditionalMirror: Boolean,
+  onTextureViewCreated: (TextureView) -> Unit,
   onSizeChanged: (IntSize) -> Unit,
 ) {
   state.previewResolution.value
@@ -197,7 +197,7 @@ private fun CameraPreviewTextureView(
       .onSizeChanged(onSizeChanged),
     content = {
       AndroidView(
-        factory = { textureView },
+        factory = { context -> TextureView(context).also(onTextureViewCreated) },
         modifier = Modifier.graphicsLayer {
           scaleX = if (needsAdditionalMirror) -1f else 1f
         },

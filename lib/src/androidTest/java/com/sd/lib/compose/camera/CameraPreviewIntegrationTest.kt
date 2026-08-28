@@ -3,14 +3,18 @@
 package com.sd.lib.compose.camera
 
 import android.Manifest
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.view.Surface
 import android.view.TextureView
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -24,6 +28,7 @@ import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assume.assumeTrue
@@ -176,6 +181,43 @@ class CameraPreviewIntegrationTest {
     _composeRule.waitForIdle()
 
     assertThat(updatedFrame.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(error.get()).isNull()
+    assertThat(state.currentSessionIdentity()).isSameInstanceAs(sessionIdentity)
+  }
+
+  @Test
+  fun localContextChange_keepsAttachedTextureViewSession() {
+    assumeCameraAvailable()
+    val baseContext = _composeRule.activity
+    val previewContext = mutableStateOf<Context>(baseContext)
+    val contextChanged = AtomicBoolean()
+    val framesAfterContextChange = CountDownLatch(5)
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+
+    _composeRule.setContent {
+      val currentContext = previewContext.value
+      CompositionLocalProvider(LocalContext provides currentContext) {
+        CameraPreview(
+          modifier = Modifier.size(240.dp),
+          state = state,
+          onError = error::set,
+          frameProcessor = FrameProcessor.Preview { frame ->
+            if (contextChanged.get() && state.isFrameTransformCurrent(frame.transformToken)) {
+              framesAfterContextChange.countDown()
+            }
+          },
+        )
+      }
+      SideEffect { contextChanged.set(currentContext !== baseContext) }
+    }
+    waitForPreview(state, error)
+    val sessionIdentity = checkNotNull(state.currentSessionIdentity())
+
+    _composeRule.runOnIdle { previewContext.value = ContextWrapper(baseContext) }
+    _composeRule.waitForIdle()
+
+    assertThat(framesAfterContextChange.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
     assertThat(error.get()).isNull()
     assertThat(state.currentSessionIdentity()).isSameInstanceAs(sessionIdentity)
   }
