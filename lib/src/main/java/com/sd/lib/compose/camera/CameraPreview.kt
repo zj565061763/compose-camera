@@ -2,7 +2,6 @@ package com.sd.lib.compose.camera
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Matrix
 import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
@@ -22,7 +21,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -76,7 +74,6 @@ fun CameraPreview(
   val cameraDeviceKey = selectedDevice?.cameraId
   val cameraPreviewMirrored = activePreviewMirrored ?: (selectedDevice?.lens == CameraLens.FRONT)
   val targetMirrored = mirrorMode.isMirrored(cameraPreviewMirrored)
-  val needsAdditionalMirror = targetMirrored != cameraPreviewMirrored
   val effectiveDisplayRotation = displayRotation ?: rememberDisplayRotation()
   val hasValidPreviewSize = previewSize.width > 0 && previewSize.height > 0
 
@@ -132,8 +129,12 @@ fun CameraPreview(
             sessionIdentity = sessionIdentity,
             bufferSize = bufferSize,
             rotationDegrees = rotationDegrees,
+            isPreviewMirrored = isPreviewMirrored,
             isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
           )
+        },
+        onPreviewFrameAvailable = { sessionIdentity ->
+          state.markPreviewFrameAvailable(sessionIdentity)?.also(currentTextureView::setTransform)
         },
         frameProcessor = when (frameProcessorMode) {
           FrameProcessorMode.NONE -> ActiveFrameProcessor.None
@@ -154,8 +155,7 @@ fun CameraPreview(
             state = state,
             sessionIdentity = sessionIdentity,
             isPreviewMirrored = isPreviewMirrored,
-            applyTextureTransform = currentTextureView::setTransform,
-            captureBitmap = currentTextureView::getBitmap,
+            captureBitmap = { width, height -> currentTextureView.getBitmap(width, height) },
           )
         },
         onError = errorDispatcher::dispatch,
@@ -174,7 +174,7 @@ fun CameraPreview(
     state = state,
     previewSize = previewSize,
     contentScale = contentScale,
-    needsAdditionalMirror = needsAdditionalMirror,
+    targetMirrored = targetMirrored,
     onTextureViewCreated = { view -> textureView = view },
     onSizeChanged = { size ->
       previewSize = size
@@ -189,14 +189,21 @@ private fun CameraPreviewTextureView(
   state: CameraPreviewState,
   previewSize: IntSize,
   contentScale: ContentScale,
-  needsAdditionalMirror: Boolean,
+  targetMirrored: Boolean,
   onTextureViewCreated: (TextureView) -> Unit,
   onSizeChanged: (IntSize) -> Unit,
 ) {
   val previewResolution = state.previewResolution.value
   val previewTransformRevision = state.previewTransformRevision
-  val textureTransform = remember(state, previewResolution, previewTransformRevision, previewSize, contentScale) {
-    state.calculateCurrentPreviewGeometry(previewSize, contentScale)?.let(::createTextureViewTransform)
+  val textureTransform = remember(
+    state,
+    previewResolution,
+    previewTransformRevision,
+    previewSize,
+    contentScale,
+    targetMirrored,
+  ) {
+    state.calculateCurrentTextureViewTransform(previewSize, contentScale, targetMirrored)
   }
   AndroidView(
     factory = { context ->
@@ -205,13 +212,10 @@ private fun CameraPreviewTextureView(
         onTextureViewCreated(view)
       }
     },
-    update = { view -> view.setTransform(textureTransform) },
+    update = { view -> textureTransform?.also(view::setTransform) },
     modifier = modifier
       .clipToBounds()
-      .onSizeChanged(onSizeChanged)
-      .graphicsLayer {
-        scaleX = if (needsAdditionalMirror) -1f else 1f
-      },
+      .onSizeChanged(onSizeChanged),
   )
 }
 
@@ -220,16 +224,17 @@ internal fun capturePreviewSampledFrame(
   state: CameraPreviewState,
   sessionIdentity: CameraFrameTransformIdentity,
   isPreviewMirrored: Boolean,
-  applyTextureTransform: (Matrix) -> Unit,
-  captureBitmap: () -> Bitmap?,
+  captureBitmap: (Int, Int) -> Bitmap?,
 ): CameraFrame.PreviewSampled? {
-  val textureTransform = state.createCurrentTextureViewTransform(sessionIdentity) ?: return null
-  applyTextureTransform(textureTransform)
-  val source = captureBitmap() ?: return null
+  val request = state.createPreviewSampleRequest(sessionIdentity, isPreviewMirrored) ?: return null
+  val source = captureBitmap(request.captureSize.width, request.captureSize.height) ?: return null
+  var sourceTransferred = false
   return try {
-    state.createSampledFrame(source, sessionIdentity, isPreviewMirrored)
+    state.createSampledFrame(source, request).also { frame ->
+      sourceTransferred = frame?.data === source
+    }
   } finally {
-    source.recycle()
+    if (!sourceTransferred) source.recycle()
   }
 }
 

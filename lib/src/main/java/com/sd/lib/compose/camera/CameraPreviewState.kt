@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.RectF
 import androidx.annotation.AnyThread
 import androidx.annotation.MainThread
 import androidx.compose.runtime.Composable
@@ -12,6 +13,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntSize
@@ -117,39 +119,89 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
-  internal fun createSampledFrame(
-    source: Bitmap,
+  internal fun createPreviewSampleRequest(
     sessionIdentity: CameraFrameTransformIdentity,
     isPreviewMirrored: Boolean,
-  ): CameraFrame.PreviewSampled? {
+  ): PreviewSampleRequest? {
     val config = _transformConfig.get()
-    if (config.sessionIdentity !== sessionIdentity) return null
+    if (
+      config.sessionIdentity !== sessionIdentity ||
+      config.isPreviewMirrored != isPreviewMirrored ||
+      !config.isPreviewFrameAvailable
+    ) return null
     val transformIdentity = config.transformIdentity ?: return null
     val geometry = config.geometry ?: return null
-    val sourceSize = IntSize(source.width, source.height)
-    val sourceOffsetX: Float
-    val sourceOffsetY: Float
-    when (sourceSize) {
-      config.previewSize -> {
-        sourceOffsetX = 0f
-        sourceOffsetY = 0f
-      }
-      geometry.contentSize -> {
-        sourceOffsetX = geometry.offsetX
-        sourceOffsetY = geometry.offsetY
-      }
-      else -> return null
-    }
+    val normalizedRotation = normalizeRotation(config.rotationDegrees)
+    val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
+    val orientedWidth = if (isQuarterTurn) config.bufferSize.height else config.bufferSize.width
+    val orientedHeight = if (isQuarterTurn) config.bufferSize.width else config.bufferSize.height
+    // getBitmap 不应用 TextureView 内容矩阵，按内容比例截图后再显式绘制到预览区域
+    val captureScale = minOf(
+      1f,
+      orientedWidth / geometry.contentSize.width,
+      orientedHeight / geometry.contentSize.height,
+    )
+    val captureSize = IntSize(
+      (geometry.contentSize.width * captureScale).roundToInt().coerceAtLeast(1),
+      (geometry.contentSize.height * captureScale).roundToInt().coerceAtLeast(1),
+    )
+    return PreviewSampleRequest(
+      sessionIdentity = sessionIdentity,
+      transformIdentity = transformIdentity,
+      captureSize = captureSize,
+      previewSize = geometry.previewSize,
+      contentBounds = Rect(
+        geometry.offsetX,
+        geometry.offsetY,
+        geometry.offsetX + geometry.contentSize.width,
+        geometry.offsetY + geometry.contentSize.height,
+      ),
+      isPreviewMirrored = config.isPreviewMirrored,
+    )
+  }
 
-    val output = Bitmap.createBitmap(config.previewSize.width, config.previewSize.height, Bitmap.Config.ARGB_8888)
-    Canvas(output).apply {
-      if (isPreviewMirrored) scale(-1f, 1f, sourceOffsetX + source.width / 2f, sourceOffsetY + source.height / 2f)
-      drawBitmap(source, sourceOffsetX, sourceOffsetY, Paint(Paint.FILTER_BITMAP_FLAG))
+  @MainThread
+  internal fun createSampledFrame(
+    source: Bitmap,
+    request: PreviewSampleRequest,
+  ): CameraFrame.PreviewSampled? {
+    val config = _transformConfig.get()
+    if (
+      config.sessionIdentity !== request.sessionIdentity ||
+      config.transformIdentity !== request.transformIdentity ||
+      IntSize(source.width, source.height) != request.captureSize
+    ) return null
+
+    val previewBounds = Rect(0f, 0f, request.previewSize.width.toFloat(), request.previewSize.height.toFloat())
+    val isDirect = !request.isPreviewMirrored && request.captureSize == request.previewSize &&
+      request.contentBounds == previewBounds
+    val output = if (isDirect) {
+      source
+    } else {
+      Bitmap.createBitmap(request.previewSize.width, request.previewSize.height, Bitmap.Config.ARGB_8888).also { bitmap ->
+        try {
+          Canvas(bitmap).apply {
+            if (request.isPreviewMirrored) {
+              scale(-1f, 1f, request.previewSize.width / 2f, request.previewSize.height / 2f)
+            }
+            val destination = request.contentBounds
+            drawBitmap(
+              source,
+              null,
+              RectF(destination.left, destination.top, destination.right, destination.bottom),
+              Paint(Paint.FILTER_BITMAP_FLAG),
+            )
+          }
+        } catch (error: Throwable) {
+          bitmap.recycle()
+          throw error
+        }
+      }
     }
     return CameraFrame.PreviewSampled(
       data = output,
       rotationDegrees = 0,
-      transformIdentity = transformIdentity,
+      transformIdentity = request.transformIdentity,
     )
   }
 
@@ -188,6 +240,7 @@ class CameraPreviewState internal constructor() {
     sessionIdentity: CameraFrameTransformIdentity,
     bufferSize: IntSize,
     rotationDegrees: Int,
+    isPreviewMirrored: Boolean = false,
     isMirrored: Boolean,
   ) {
     val current = _transformConfig.get()
@@ -198,7 +251,9 @@ class CameraPreviewState internal constructor() {
         transformIdentity = sessionIdentity,
         bufferSize = bufferSize,
         rotationDegrees = normalizedRotation,
+        isPreviewMirrored = isPreviewMirrored,
         isMirrored = isMirrored,
+        isPreviewFrameAvailable = false,
         geometry = calculatePreviewGeometry(
           bufferSize = bufferSize,
           rotationDegrees = normalizedRotation,
@@ -221,6 +276,8 @@ class CameraPreviewState internal constructor() {
         transformIdentity = null,
         bufferSize = IntSize.Zero,
         rotationDegrees = 0,
+        isPreviewMirrored = false,
+        isPreviewFrameAvailable = false,
         geometry = null,
       ),
     )
@@ -233,22 +290,40 @@ class CameraPreviewState internal constructor() {
     sessionIdentity: CameraFrameTransformIdentity,
   ): Matrix? {
     val current = _transformConfig.get()
-    if (current.sessionIdentity !== sessionIdentity) return null
-    return current.geometry?.let(::createTextureViewTransform)
+    if (current.sessionIdentity !== sessionIdentity || !current.isPreviewFrameAvailable) return null
+    return current.geometry?.let { geometry ->
+      createTextureViewTransform(geometry, current.isMirrored != current.isPreviewMirrored)
+    }
   }
 
   @MainThread
-  internal fun calculateCurrentPreviewGeometry(
+  internal fun markPreviewFrameAvailable(
+    sessionIdentity: CameraFrameTransformIdentity,
+  ): Matrix? {
+    val current = _transformConfig.get()
+    if (current.sessionIdentity !== sessionIdentity || current.isPreviewFrameAvailable) return null
+    _transformConfig.set(current.copy(isPreviewFrameAvailable = true))
+    _previewTransformRevision.intValue++
+    return current.geometry?.let { geometry ->
+      createTextureViewTransform(geometry, current.isMirrored != current.isPreviewMirrored)
+    }
+  }
+
+  @MainThread
+  internal fun calculateCurrentTextureViewTransform(
     previewSize: IntSize,
     contentScale: ContentScale,
-  ): PreviewGeometry? {
+    isMirrored: Boolean,
+  ): Matrix? {
     val current = _transformConfig.get()
-    return calculatePreviewGeometry(
+    if (!current.isPreviewFrameAvailable) return null
+    val geometry = calculatePreviewGeometry(
       bufferSize = current.bufferSize,
       rotationDegrees = current.rotationDegrees,
       previewSize = previewSize,
       contentScale = contentScale,
-    )
+    ) ?: return null
+    return createTextureViewTransform(geometry, isMirrored != current.isPreviewMirrored)
   }
 
   @MainThread
@@ -268,22 +343,36 @@ private data class PreviewTransformConfig(
   val previewSize: IntSize = IntSize.Zero,
   val contentScale: ContentScale = ContentScale.Crop,
   val geometry: PreviewGeometry? = null,
+  val isPreviewMirrored: Boolean = false,
   val isMirrored: Boolean = false,
+  val isPreviewFrameAvailable: Boolean = false,
+)
+
+internal data class PreviewSampleRequest(
+  val sessionIdentity: CameraFrameTransformIdentity,
+  val transformIdentity: CameraFrameTransformIdentity,
+  val captureSize: IntSize,
+  val previewSize: IntSize,
+  val contentBounds: Rect,
+  val isPreviewMirrored: Boolean,
 )
 
 internal data class PreviewGeometry(
   val previewSize: IntSize,
-  val contentSize: IntSize,
+  val contentSize: Size,
   val offsetX: Float,
   val offsetY: Float,
   val scaleX: Float,
   val scaleY: Float,
 )
 
-internal fun createTextureViewTransform(geometry: PreviewGeometry): Matrix {
+internal fun createTextureViewTransform(
+  geometry: PreviewGeometry,
+  shouldMirror: Boolean = false,
+): Matrix {
   val previewWidth = geometry.previewSize.width.toFloat()
   val previewHeight = geometry.previewSize.height.toFloat()
-  return Matrix().apply {
+  val contentTransform = Matrix().apply {
     setValues(
       floatArrayOf(
         geometry.contentSize.width / previewWidth, 0f, geometry.offsetX,
@@ -292,6 +381,17 @@ internal fun createTextureViewTransform(geometry: PreviewGeometry): Matrix {
       ),
     )
   }
+  if (!shouldMirror) return contentTransform
+  val mirror = Matrix().apply {
+    setValues(
+      floatArrayOf(
+        -1f, 0f, previewWidth,
+        0f, 1f, 0f,
+        0f, 0f, 1f,
+      ),
+    )
+  }
+  return Matrix().apply { setConcat(mirror, contentTransform) }
 }
 
 internal fun calculatePreviewGeometry(
@@ -314,15 +414,16 @@ internal fun calculatePreviewGeometry(
     srcSize = Size(orientedWidth.toFloat(), orientedHeight.toFloat()),
     dstSize = Size(previewSize.width.toFloat(), previewSize.height.toFloat()),
   )
-  val contentWidth = (orientedWidth * scale.scaleX).roundToInt().coerceAtLeast(1)
-  val contentHeight = (orientedHeight * scale.scaleY).roundToInt().coerceAtLeast(1)
+  val contentWidth = orientedWidth * scale.scaleX
+  val contentHeight = orientedHeight * scale.scaleY
+  if (!contentWidth.isFinite() || !contentHeight.isFinite() || contentWidth <= 0f || contentHeight <= 0f) return null
   return PreviewGeometry(
     previewSize = previewSize,
-    contentSize = IntSize(contentWidth, contentHeight),
+    contentSize = Size(contentWidth, contentHeight),
     offsetX = (previewSize.width - contentWidth) / 2f,
     offsetY = (previewSize.height - contentHeight) / 2f,
-    scaleX = contentWidth.toFloat() / orientedWidth,
-    scaleY = contentHeight.toFloat() / orientedHeight,
+    scaleX = contentWidth / orientedWidth,
+    scaleY = contentHeight / orientedHeight,
   )
 }
 

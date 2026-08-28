@@ -38,6 +38,7 @@ internal class CameraPreviewController(
     Int,
     Boolean,
   ) -> Unit,
+  private val onPreviewFrameAvailable: (CameraFrameTransformIdentity) -> Unit,
   frameProcessor: ActiveFrameProcessor,
   private val captureSampledFrame: (
     CameraFrameTransformIdentity,
@@ -65,6 +66,8 @@ internal class CameraPreviewController(
   private var _periodicAutoFocus: PeriodicAutoFocus? = null
   @Volatile
   private var _sessionIdentity: CameraFrameTransformIdentity? = null
+  @Volatile
+  private var _previewStartedSessionIdentity: CameraFrameTransformIdentity? = null
   private var _cameraSurfaceTexture: SurfaceTexture? = null
   private var _surfaceTexture: SurfaceTexture? = textureView.surfaceTexture.takeIf { textureView.isAvailable }
   private var _started = false
@@ -101,7 +104,12 @@ internal class CameraPreviewController(
       return false
     }
 
-    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+      val sessionIdentity = _previewStartedSessionIdentity ?: return
+      if (!_closed && _shouldRun && _sessionIdentity === sessionIdentity) {
+        onPreviewFrameAvailable(sessionIdentity)
+      }
+    }
   }
 
   fun start() {
@@ -272,6 +280,9 @@ internal class CameraPreviewController(
     }
     _sampledFrameDispatcher?.start()
     camera.startPreview()
+    if (_camera === camera && isCurrentStartRequest(generation)) {
+      _previewStartedSessionIdentity = sessionIdentity
+    }
     if (configuredFocusMode == Camera.Parameters.FOCUS_MODE_AUTO) startPeriodicAutoFocus(camera, generation)
   }
 
@@ -381,6 +392,7 @@ internal class CameraPreviewController(
     _periodicAutoFocus = null
     _camera = null
     _sessionIdentity = null
+    _previewStartedSessionIdentity = null
     _cameraSurfaceTexture = null
     _previewFrameDispatcher?.discardPending()
     _sampledFrameDispatcher?.stop()

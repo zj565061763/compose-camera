@@ -537,6 +537,7 @@ class CameraPreviewIntegrationTest {
         previewViewSize = IntSize(240, 240),
         transformIdentityProvider = { null },
         onSessionStarted = { _, _, _, _ -> error("Camera session must not start.") },
+        onPreviewFrameAvailable = { error("Preview frame must not be published.") },
         frameProcessor = ActiveFrameProcessor.None,
         captureSampledFrame = { _, _ -> null },
         onError = receivedError::set,
@@ -576,6 +577,7 @@ class CameraPreviewIntegrationTest {
         previewViewSize = IntSize(240, 240),
         transformIdentityProvider = { null },
         onSessionStarted = { _, _, _, _ -> error("Camera session must not start.") },
+        onPreviewFrameAvailable = { error("Preview frame must not be published.") },
         frameProcessor = ActiveFrameProcessor.None,
         captureSampledFrame = { _, _ -> null },
         onError = receivedError::set,
@@ -636,7 +638,12 @@ class CameraPreviewIntegrationTest {
 
   private fun waitForPreview(state: CameraPreviewState, error: AtomicReference<Throwable?>) {
     _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
-      error.get() != null || state.previewResolution.value != IntSize.Zero
+      val sessionIdentity = state.currentSessionIdentity()
+      error.get() != null || (
+        state.previewResolution.value != IntSize.Zero &&
+          sessionIdentity != null &&
+          state.createCurrentTextureViewTransform(sessionIdentity) != null
+      )
     }
   }
 
