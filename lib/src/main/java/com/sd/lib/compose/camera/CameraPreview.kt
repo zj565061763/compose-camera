@@ -1,12 +1,15 @@
 package com.sd.lib.compose.camera
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import androidx.annotation.MainThread
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -146,14 +149,14 @@ fun CameraPreview(
             },
           )
         },
-        captureSampledFrame = captureSampledFrame@ { sessionIdentity, isPreviewMirrored ->
-          if (state.currentSessionIdentity() !== sessionIdentity) return@captureSampledFrame null
-          val source = currentTextureView.getBitmap() ?: return@captureSampledFrame null
-          try {
-            state.createSampledFrame(source, sessionIdentity, isPreviewMirrored)
-          } finally {
-            source.recycle()
-          }
+        captureSampledFrame = { sessionIdentity, isPreviewMirrored ->
+          capturePreviewSampledFrame(
+            state = state,
+            sessionIdentity = sessionIdentity,
+            isPreviewMirrored = isPreviewMirrored,
+            applyTextureTransform = currentTextureView::setTransform,
+            captureBitmap = currentTextureView::getBitmap,
+          )
         },
         onError = errorDispatcher::dispatch,
         onSessionClosed = { sessionIdentity ->
@@ -191,7 +194,8 @@ private fun CameraPreviewTextureView(
   onSizeChanged: (IntSize) -> Unit,
 ) {
   val previewResolution = state.previewResolution.value
-  val textureTransform = remember(state, previewResolution, previewSize, contentScale) {
+  val previewTransformRevision = state.previewTransformRevision
+  val textureTransform = remember(state, previewResolution, previewTransformRevision, previewSize, contentScale) {
     state.calculateCurrentPreviewGeometry(previewSize, contentScale)?.let(::createTextureViewTransform)
   }
   AndroidView(
@@ -209,6 +213,24 @@ private fun CameraPreviewTextureView(
         scaleX = if (needsAdditionalMirror) -1f else 1f
       },
   )
+}
+
+@MainThread
+internal fun capturePreviewSampledFrame(
+  state: CameraPreviewState,
+  sessionIdentity: CameraFrameTransformIdentity,
+  isPreviewMirrored: Boolean,
+  applyTextureTransform: (Matrix) -> Unit,
+  captureBitmap: () -> Bitmap?,
+): CameraFrame.PreviewSampled? {
+  val textureTransform = state.createCurrentTextureViewTransform(sessionIdentity) ?: return null
+  applyTextureTransform(textureTransform)
+  val source = captureBitmap() ?: return null
+  return try {
+    state.createSampledFrame(source, sessionIdentity, isPreviewMirrored)
+  } finally {
+    source.recycle()
+  }
 }
 
 /** 监听当前 View 所在显示器的旋转，包括不会触发 Configuration 变化的 180° 旋转。 */

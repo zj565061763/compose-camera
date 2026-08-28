@@ -48,7 +48,7 @@
 
 ## 预览尺寸、旋转与镜像
 
-- Controller 优先从不超过 `1280 × 960` 像素且面积不低于最大候选四分之一的预览尺寸中，选择旋转后最接近 Compose 区域比例的尺寸；若设备没有符合上限的尺寸，则从全部尺寸中选择并应用相同的质量下限。
+- Controller 优先从不超过 `1280 × 960` 像素且面积不低于最大候选四分之一的预览尺寸中，选择旋转后最接近 Compose 区域比例的尺寸；若设备没有符合上限的尺寸，则选择像素面积最小的尺寸，避免为比例匹配分配过大的相机和 NV21 缓冲区。
 - 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用任一帧处理模式且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
 - `TextureView` 保持 Compose 预览区域尺寸，并通过内容变换矩阵应用旋转后的原始帧比例和 `ContentScale`，避免 AndroidView 互操作层把相机缓冲区直接拉伸到预览区域。
 - 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
@@ -66,6 +66,7 @@
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
 - `PreviewSampled` 按 `TextureView` 自然尺寸截图；截图已经等于预览区域时不得再次应用 `ContentScale` 裁剪，只有完整内容尺寸截图才按预览偏移裁切。
+- `PreviewSampled` 截图前必须在主线程同步应用当前预览变换，截图矩阵和 transform token 必须来自同一份状态快照。
 - NV21 帧宽高必须为正偶数，所需字节数必须能安全表示为 `Int`，实际数据长度不得小于 `width × height × 3 / 2`。不符合条件的回调缓冲区直接归还，不创建 `CameraFrame`。
 - 每个相机回调缓冲区都必须在处理完成、被替换、被丢弃或 dispatcher 关闭时归还。
 - 帧回调异常和缓冲区归还异常必须保留正确的主异常及 suppressed 异常；致命 `Error` 不得作为业务异常吞掉。

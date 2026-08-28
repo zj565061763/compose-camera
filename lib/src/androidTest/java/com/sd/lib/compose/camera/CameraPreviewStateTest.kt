@@ -5,6 +5,7 @@ package com.sd.lib.compose.camera
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.ImageFormat
+import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
@@ -39,7 +40,7 @@ class CameraPreviewStateTest {
     val center = floatArrayOf(320f, 240f).also(matrix::mapPoints)
     val bounds = RectF(0f, 0f, 640f, 480f).also(matrix::mapRect)
 
-    assertThat(center[0]).isWithin(0.01f).of(100.5f)
+    assertThat(center[0]).isWithin(0.01f).of(100f)
     assertThat(center[1]).isWithin(0.01f).of(100f)
     assertThat(bounds.left).isLessThan(0f)
     assertThat(bounds.top).isWithin(0.01f).of(0f)
@@ -122,7 +123,7 @@ class CameraPreviewStateTest {
   }
 
   @Test
-  fun createTransformToPreview_mirrorMatchesIntegerContentPlacement() {
+  fun createTransformToPreview_mirrorMatchesPreviewCenterForOddCrop() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(3, 3), ContentScale.Crop, isMirrored = true)
@@ -131,11 +132,11 @@ class CameraPreviewStateTest {
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 4, 2, 0)))
     val points = floatArrayOf(0f, 0f, 4f, 2f).also(matrix::mapPoints)
 
-    assertThat(points.asList()).containsExactly(5f, 0f, -1f, 3f).inOrder()
+    assertThat(points.asList()).containsExactly(4.5f, 0f, -1.5f, 3f).inOrder()
   }
 
   @Test
-  fun createTransformToPreview_sampledFrameMirrorMatchesIntegerContentPlacement() {
+  fun createTransformToPreview_sampledFrameMirrorsAroundPreviewCenter() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(4, 3), ContentScale.Fit, isMirrored = true)
@@ -146,8 +147,61 @@ class CameraPreviewStateTest {
     val matrix = checkNotNull(state.createTransformToPreview(frame))
     val points = floatArrayOf(0f, 0f, 3f, 3f).also(matrix::mapPoints)
 
-    assertThat(points.asList()).containsExactly(3f, 0f, 0f, 3f).inOrder()
+    assertThat(points.asList()).containsExactly(4f, 0f, 1f, 3f).inOrder()
     bitmap.recycle()
+  }
+
+  @Test
+  fun currentTextureViewTransform_sameResolutionUsesLatestSessionRotation() {
+    val state = CameraPreviewState()
+    val firstIdentity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(300, 300), ContentScale.Crop, isMirrored = false)
+    state.startSession(firstIdentity, IntSize(400, 200), rotationDegrees = 0, isMirrored = false)
+    val firstRevision = state.previewTransformRevision
+    val firstTransform = checkNotNull(state.createCurrentTextureViewTransform(firstIdentity))
+
+    val secondIdentity = CameraFrameTransformIdentity()
+    state.startSession(secondIdentity, IntSize(400, 200), rotationDegrees = 90, isMirrored = false)
+
+    val secondTransform = checkNotNull(state.createCurrentTextureViewTransform(secondIdentity))
+    val firstBounds = RectF(0f, 0f, 300f, 300f).also(firstTransform::mapRect)
+    val secondBounds = RectF(0f, 0f, 300f, 300f).also(secondTransform::mapRect)
+    assertThat(state.previewTransformRevision).isNotEqualTo(firstRevision)
+    assertThat(state.createCurrentTextureViewTransform(firstIdentity)).isNull()
+    assertThat(firstBounds).isEqualTo(RectF(-150f, 0f, 450f, 300f))
+    assertThat(secondBounds).isEqualTo(RectF(0f, -150f, 300f, 450f))
+  }
+
+  @Test
+  fun capturePreviewSampledFrame_appliesLatestLayoutTransformBeforeCapture() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(4, 4), ContentScale.Crop, isMirrored = false)
+    state.startSession(identity, IntSize(8, 4), rotationDegrees = 0, isMirrored = false)
+    val oldTransform = checkNotNull(state.createCurrentTextureViewTransform(identity))
+    state.updatePreviewLayout(IntSize(3, 3), ContentScale.Crop, isMirrored = false)
+    val source = Bitmap.createBitmap(3, 3, Bitmap.Config.ARGB_8888)
+    var appliedTransform: Matrix? = null
+    var transformAtCapture: Matrix? = null
+
+    val frame = checkNotNull(
+      capturePreviewSampledFrame(
+        state = state,
+        sessionIdentity = identity,
+        isPreviewMirrored = false,
+        applyTextureTransform = { matrix -> appliedTransform = Matrix(matrix) },
+        captureBitmap = {
+          transformAtCapture = appliedTransform?.let(::Matrix)
+          source
+        },
+      ),
+    )
+
+    val expectedTransform = checkNotNull(state.createCurrentTextureViewTransform(identity))
+    assertMatrixEquals(transformAtCapture, expectedTransform)
+    assertMatrixNotEquals(transformAtCapture, oldTransform)
+    assertThat(source.isRecycled).isTrue()
+    frame.data.recycle()
   }
 
   @Test
@@ -178,7 +232,7 @@ class CameraPreviewStateTest {
   }
 
   @Test
-  fun createSampledFrame_platformMirrorMatchesIntegerContentPlacement() {
+  fun createSampledFrame_platformMirrorCentersOddWidthContent() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(4, 3), ContentScale.Fit, isMirrored = false)
@@ -193,10 +247,10 @@ class CameraPreviewStateTest {
 
     val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = true))
 
-    assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.RED)
-    assertThat(frame.data.getPixel(1, 0)).isEqualTo(Color.BLUE)
-    assertThat(frame.data.getPixel(2, 0)).isEqualTo(Color.YELLOW)
-    assertThat(frame.data.getPixel(3, 0)).isEqualTo(Color.TRANSPARENT)
+    assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.TRANSPARENT)
+    assertThat(Color.alpha(frame.data.getPixel(1, 0))).isGreaterThan(0)
+    assertThat(Color.alpha(frame.data.getPixel(2, 0))).isGreaterThan(0)
+    assertThat(Color.alpha(frame.data.getPixel(3, 0))).isGreaterThan(0)
     frame.data.recycle()
     source.recycle()
   }
@@ -341,6 +395,17 @@ class CameraPreviewStateTest {
     )
 
     assertThat(selected).isEqualTo(IntSize(1280, 960))
+  }
+
+  @Test
+  fun choosePreviewSize_allSizesAboveLimitSelectsSmallestBuffer() {
+    val selected = choosePreviewSize(
+      sizes = listOf(IntSize(7680, 7680), IntSize(4096, 3072), IntSize(1920, 1080)),
+      previewViewSize = IntSize(1000, 1000),
+      rotationDegrees = 0,
+    )
+
+    assertThat(selected).isEqualTo(IntSize(1920, 1080))
   }
 
   @Test
@@ -937,6 +1002,18 @@ private data class SampledFrameResult(
   val threadName: String,
   val recycledDuringCallback: Boolean,
 )
+
+private fun assertMatrixEquals(actual: Matrix?, expected: Matrix) {
+  val actualValues = FloatArray(9).also(checkNotNull(actual)::getValues)
+  val expectedValues = FloatArray(9).also(expected::getValues)
+  assertThat(actualValues.asList()).containsExactlyElementsIn(expectedValues.asList()).inOrder()
+}
+
+private fun assertMatrixNotEquals(actual: Matrix?, expected: Matrix) {
+  val actualValues = FloatArray(9).also(checkNotNull(actual)::getValues)
+  val expectedValues = FloatArray(9).also(expected::getValues)
+  assertThat(actualValues.asList()).isNotEqualTo(expectedValues.asList())
+}
 
 private fun CameraFrameDispatcher.offerFrame(
   value: Int,

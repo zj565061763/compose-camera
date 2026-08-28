@@ -29,6 +29,7 @@ fun rememberCameraPreviewState(): CameraPreviewState {
 class CameraPreviewState internal constructor() {
   private val _transformConfig = AtomicReference(PreviewTransformConfig())
   private val _previewResolution = mutableStateOf(IntSize.Zero)
+  private val _previewTransformRevision = mutableIntStateOf(0)
   private val _retryGeneration = mutableIntStateOf(0)
 
   /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero]。 */
@@ -41,6 +42,7 @@ class CameraPreviewState internal constructor() {
   }
 
   internal val retryGeneration: Int get() = _retryGeneration.intValue
+  internal val previewTransformRevision: Int get() = _previewTransformRevision.intValue
 
   /** 判断异步结果是否仍属于当前预览变换 */
   @AnyThread
@@ -86,7 +88,7 @@ class CameraPreviewState internal constructor() {
     val mirror = Matrix().apply {
       setValues(
         floatArrayOf(
-          -1f, 0f, geometry.offsetX * 2 + geometry.contentSize.width,
+          -1f, 0f, geometry.previewSize.width.toFloat(),
           0f, 1f, 0f,
           0f, 0f, 1f,
         ),
@@ -106,7 +108,7 @@ class CameraPreviewState internal constructor() {
     return Matrix().apply {
       setValues(
         floatArrayOf(
-          -1f, 0f, geometry.offsetX * 2 + geometry.contentSize.width,
+          -1f, 0f, geometry.previewSize.width.toFloat(),
           0f, 1f, 0f,
           0f, 0f, 1f,
         ),
@@ -178,6 +180,7 @@ class CameraPreviewState internal constructor() {
         },
       ),
     )
+    if (transformChanged) _previewTransformRevision.intValue++
   }
 
   @MainThread
@@ -204,6 +207,7 @@ class CameraPreviewState internal constructor() {
         ),
       ),
     )
+    _previewTransformRevision.intValue++
     _previewResolution.value = bufferSize
   }
 
@@ -220,7 +224,17 @@ class CameraPreviewState internal constructor() {
         geometry = null,
       ),
     )
+    _previewTransformRevision.intValue++
     _previewResolution.value = IntSize.Zero
+  }
+
+  @MainThread
+  internal fun createCurrentTextureViewTransform(
+    sessionIdentity: CameraFrameTransformIdentity,
+  ): Matrix? {
+    val current = _transformConfig.get()
+    if (current.sessionIdentity !== sessionIdentity) return null
+    return current.geometry?.let(::createTextureViewTransform)
   }
 
   @MainThread
@@ -240,6 +254,7 @@ class CameraPreviewState internal constructor() {
   @MainThread
   internal fun reset() {
     _transformConfig.set(PreviewTransformConfig())
+    _previewTransformRevision.intValue++
     _previewResolution.value = IntSize.Zero
     _retryGeneration.intValue = 0
   }
@@ -304,8 +319,8 @@ internal fun calculatePreviewGeometry(
   return PreviewGeometry(
     previewSize = previewSize,
     contentSize = IntSize(contentWidth, contentHeight),
-    offsetX = ((previewSize.width - contentWidth) / 2).toFloat(),
-    offsetY = ((previewSize.height - contentHeight) / 2).toFloat(),
+    offsetX = (previewSize.width - contentWidth) / 2f,
+    offsetY = (previewSize.height - contentHeight) / 2f,
     scaleX = contentWidth.toFloat() / orientedWidth,
     scaleY = contentHeight.toFloat() / orientedHeight,
   )

@@ -962,21 +962,23 @@ internal fun choosePreviewSize(
   }
   val normalizedRotation = normalizeRotation(rotationDegrees)
   val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
-  val preferredSizes = sizes.filter { size -> size.width.toLong() * size.height <= MAX_PREVIEW_PIXELS }
-    .ifEmpty { sizes }
-  val largestPreferredArea = preferredSizes.maxOf { size -> size.width.toLong() * size.height }
-  val minimumPreferredArea = largestPreferredArea / PREVIEW_QUALITY_AREA_DIVISOR
-  val qualitySizes = preferredSizes.filter { size ->
-    size.width.toLong() * size.height >= minimumPreferredArea
+  val aspectComparator = compareBy<IntSize> { size ->
+    val orientedWidth = if (isQuarterTurn) size.height else size.width
+    val orientedHeight = if (isQuarterTurn) size.width else size.height
+    abs(orientedWidth.toFloat() / orientedHeight - targetAspectRatio)
   }
-  return qualitySizes.minWithOrNull(
-    compareBy<IntSize> { size ->
-      val orientedWidth = if (isQuarterTurn) size.height else size.width
-      val orientedHeight = if (isQuarterTurn) size.width else size.height
-      abs(orientedWidth.toFloat() / orientedHeight - targetAspectRatio)
-    }.thenByDescending { size -> size.width.toLong() * size.height },
-  ) ?: sizes.first()
+  val boundedSizes = sizes.filter { size -> previewArea(size) <= MAX_PREVIEW_PIXELS }
+  return if (boundedSizes.isNotEmpty()) {
+    val largestArea = boundedSizes.maxOf(::previewArea)
+    boundedSizes
+      .filter { size -> previewArea(size) >= largestArea / PREVIEW_QUALITY_AREA_DIVISOR }
+      .minWithOrNull(aspectComparator.thenByDescending(::previewArea))
+  } else {
+    sizes.minByOrNull(::previewArea)
+  } ?: sizes.first()
 }
+
+private fun previewArea(size: IntSize): Long = size.width.toLong() * size.height
 
 internal fun calculateCameraDisplayOrientation(cameraInfo: Camera.CameraInfo, displayRotation: Int): Int {
   val displayDegrees = displayRotationDegrees(displayRotation)
