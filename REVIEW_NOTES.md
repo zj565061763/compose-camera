@@ -52,7 +52,7 @@
 - `TextureView` 按旋转后的原始帧比例和 `ContentScale` 计算内容尺寸，避免把相机缓冲区直接拉伸到 Compose 区域。
 - 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
 - 平台默认镜像前置预览。额外 `graphicsLayer` 水平翻转只用于补偿平台默认状态与 `CameraMirrorMode` 目标状态的差异。
-- 优先使用连续对焦模式；设备只支持 `FOCUS_MODE_AUTO` 时，预览启动后立即对焦并每秒重新触发一次，会话停止时取消定时任务。
+- 优先使用连续对焦模式；设备只支持 `FOCUS_MODE_AUTO` 时，预览启动后立即对焦并每两秒重新触发一次，会话停止时取消定时任务。
 - `CameraPreviewState` 以不可变快照和 `AtomicReference` 跨线程发布变换，分析线程无锁读取。
 - 变换链为 `raw frame -> display rotation -> ContentScale -> target mirror`。
 - 新相机会话、有效布局尺寸、`contentScale` 或目标镜像变化必须使旧 transform token 失效。
