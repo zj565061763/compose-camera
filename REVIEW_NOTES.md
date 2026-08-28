@@ -48,9 +48,9 @@
 
 ## 预览尺寸、旋转与镜像
 
-- Controller 从设备支持的预览尺寸中选择旋转后最接近 Compose 区域比例的尺寸，并优先限制在 `1280 × 960` 像素以内；若设备没有符合上限的尺寸，则从全部尺寸中选择。
+- Controller 优先从不超过 `1280 × 960` 像素且面积不低于最大候选四分之一的预览尺寸中，选择旋转后最接近 Compose 区域比例的尺寸；若设备没有符合上限的尺寸，则从全部尺寸中选择并应用相同的质量下限。
 - 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用任一帧处理模式且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
-- `TextureView` 按旋转后的原始帧比例和 `ContentScale` 计算内容尺寸，避免把相机缓冲区直接拉伸到 Compose 区域。
+- `TextureView` 保持 Compose 预览区域尺寸，并通过内容变换矩阵应用旋转后的原始帧比例和 `ContentScale`，避免 AndroidView 互操作层把相机缓冲区直接拉伸到预览区域。
 - 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
 - 平台默认镜像前置预览。额外 `graphicsLayer` 水平翻转只用于补偿平台默认状态与 `CameraMirrorMode` 目标状态的差异。
 - 优先使用连续对焦模式；设备只支持 `FOCUS_MODE_AUTO` 时，预览启动后立即对焦并每两秒重新触发一次，会话停止时取消定时任务。

@@ -69,6 +69,46 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun createTextureViewTransform_cropPreservesRotatedBufferAspect() {
+    val geometry = checkNotNull(
+      calculatePreviewGeometry(
+        bufferSize = IntSize(352, 288),
+        rotationDegrees = 90,
+        previewSize = IntSize(1080, 1080),
+        contentScale = ContentScale.Crop,
+      ),
+    )
+
+    val matrix = createTextureViewTransform(geometry)
+    val bounds = RectF(0f, 0f, 1080f, 1080f).also(matrix::mapRect)
+
+    assertThat(bounds.left).isWithin(0.01f).of(0f)
+    assertThat(bounds.top).isWithin(0.01f).of(-120f)
+    assertThat(bounds.right).isWithin(0.01f).of(1080f)
+    assertThat(bounds.bottom).isWithin(0.01f).of(1200f)
+  }
+
+  @Test
+  fun createTextureViewTransform_fitPreservesRotatedBufferAspect() {
+    val geometry = checkNotNull(
+      calculatePreviewGeometry(
+        bufferSize = IntSize(352, 288),
+        rotationDegrees = 90,
+        previewSize = IntSize(1080, 1080),
+        contentScale = ContentScale.Fit,
+      ),
+    )
+
+    val matrix = createTextureViewTransform(geometry)
+    val bounds = RectF(0f, 0f, 1080f, 1080f).also(matrix::mapRect)
+
+    assertThat(bounds.left).isWithin(0.01f).of(98f)
+    assertThat(bounds.top).isWithin(0.01f).of(0f)
+    assertThat(bounds.right).isWithin(0.01f).of(982f)
+    assertThat(bounds.bottom).isWithin(0.01f).of(1080f)
+  }
+
+  @Test
   fun createTransformToPreview_mirrorsAroundPreviewWidth() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
@@ -283,6 +323,24 @@ class CameraPreviewStateTest {
     )
 
     assertThat(selected).isEqualTo(IntSize(1024, 768))
+  }
+
+  @Test
+  fun choosePreviewSize_doesNotTradeMostResolutionForSmallAspectGain() {
+    val selected = choosePreviewSize(
+      sizes = listOf(
+        IntSize(1920, 1920),
+        IntSize(1280, 960),
+        IntSize(1280, 720),
+        IntSize(640, 480),
+        IntSize(352, 288),
+        IntSize(320, 240),
+      ),
+      previewViewSize = IntSize(1080, 1080),
+      rotationDegrees = 90,
+    )
+
+    assertThat(selected).isEqualTo(IntSize(1280, 960))
   }
 
   @Test

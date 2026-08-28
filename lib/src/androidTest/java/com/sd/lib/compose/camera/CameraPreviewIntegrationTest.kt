@@ -5,15 +5,19 @@ package com.sd.lib.compose.camera
 import android.Manifest
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
+import android.view.ViewGroup
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.IntSize
@@ -155,6 +159,47 @@ class CameraPreviewIntegrationTest {
     assertThat(state.previewResolution.value).isNotEqualTo(IntSize.Zero)
     assertThat(activeCameraThreads() - initialCameraThreads).isNotEmpty()
     assertThat(activeAnalysisThreads() - initialAnalysisThreads).isEmpty()
+  }
+
+  @Test
+  fun cameraPreview_appliesContentTransformToPreviewSizedTextureView() {
+    assumeCameraAvailable()
+    val cameraInfo = Camera.CameraInfo().also { Camera.getCameraInfo(0, it) }
+    val rotationDegrees = calculateCameraFrameRotation(cameraInfo, Surface.ROTATION_0)
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(240.dp),
+        state = state,
+        displayRotation = Surface.ROTATION_0,
+        onError = error::set,
+      )
+    }
+    waitForPreview(state, error)
+
+    _composeRule.runOnIdle {
+      val textureView = checkNotNull(findTextureView(_composeRule.activity.window.decorView))
+      val previewSize = IntSize(textureView.width, textureView.height)
+      val geometry = checkNotNull(
+        calculatePreviewGeometry(
+          bufferSize = state.previewResolution.value,
+          rotationDegrees = rotationDegrees,
+          previewSize = previewSize,
+          contentScale = ContentScale.Crop,
+        ),
+      )
+      val expectedValues = FloatArray(9).also(createTextureViewTransform(geometry)::getValues)
+      val actualValues = FloatArray(9).also(textureView.getTransform(Matrix())::getValues)
+
+      assertThat(error.get()).isNull()
+      assertThat(textureView.width).isEqualTo(textureView.height)
+      assertThat(textureView.isOpaque).isFalse()
+      actualValues.indices.forEach { index ->
+        assertThat(actualValues[index]).isWithin(0.01f).of(expectedValues[index])
+      }
+    }
   }
 
   @Test
@@ -607,6 +652,15 @@ class CameraPreviewIntegrationTest {
     return Thread.getAllStackTraces().keys.filterTo(linkedSetOf()) { thread ->
       thread.isAlive && thread.name == name
     }
+  }
+
+  private fun findTextureView(view: View): TextureView? {
+    if (view is TextureView) return view
+    if (view !is ViewGroup) return null
+    repeat(view.childCount) { index ->
+      findTextureView(view.getChildAt(index))?.also { return it }
+    }
+    return null
   }
 
   private data class FrameResult(

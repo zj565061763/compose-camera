@@ -21,11 +21,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -171,6 +169,7 @@ fun CameraPreview(
   CameraPreviewTextureView(
     modifier = modifier,
     state = state,
+    previewSize = previewSize,
     contentScale = contentScale,
     needsAdditionalMirror = needsAdditionalMirror,
     onTextureViewCreated = { view -> textureView = view },
@@ -185,41 +184,31 @@ fun CameraPreview(
 private fun CameraPreviewTextureView(
   modifier: Modifier,
   state: CameraPreviewState,
+  previewSize: IntSize,
   contentScale: ContentScale,
   needsAdditionalMirror: Boolean,
   onTextureViewCreated: (TextureView) -> Unit,
   onSizeChanged: (IntSize) -> Unit,
 ) {
-  state.previewResolution.value
-  Layout(
+  val previewResolution = state.previewResolution.value
+  val textureTransform = remember(state, previewResolution, previewSize, contentScale) {
+    state.calculateCurrentPreviewGeometry(previewSize, contentScale)?.let(::createTextureViewTransform)
+  }
+  AndroidView(
+    factory = { context ->
+      TextureView(context).also { view ->
+        view.isOpaque = false
+        onTextureViewCreated(view)
+      }
+    },
+    update = { view -> view.setTransform(textureTransform) },
     modifier = modifier
       .clipToBounds()
-      .onSizeChanged(onSizeChanged),
-    content = {
-      AndroidView(
-        factory = { context -> TextureView(context).also(onTextureViewCreated) },
-        modifier = Modifier.graphicsLayer {
-          scaleX = if (needsAdditionalMirror) -1f else 1f
-        },
-      )
-    },
-  ) { measurables, constraints ->
-    val width = if (constraints.hasBoundedWidth) constraints.maxWidth else constraints.minWidth
-    val height = if (constraints.hasBoundedHeight) constraints.maxHeight else constraints.minHeight
-    val geometry = state.calculateCurrentPreviewGeometry(IntSize(width, height), contentScale)
-    val contentSize = geometry?.contentSize ?: IntSize(width, height)
-    val placeable = measurables.single().measure(
-      Constraints.fixed(
-        width = contentSize.width.coerceAtLeast(1),
-        height = contentSize.height.coerceAtLeast(1),
-      ),
-    )
-    layout(width, height) {
-      val x = geometry?.offsetX?.toInt() ?: 0
-      val y = geometry?.offsetY?.toInt() ?: 0
-      placeable.place(x, y)
-    }
-  }
+      .onSizeChanged(onSizeChanged)
+      .graphicsLayer {
+        scaleX = if (needsAdditionalMirror) -1f else 1f
+      },
+  )
 }
 
 /** 监听当前 View 所在显示器的旋转，包括不会触发 Configuration 变化的 180° 旋转。 */

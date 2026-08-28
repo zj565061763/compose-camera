@@ -265,6 +265,20 @@ internal data class PreviewGeometry(
   val scaleY: Float,
 )
 
+internal fun createTextureViewTransform(geometry: PreviewGeometry): Matrix {
+  val previewWidth = geometry.previewSize.width.toFloat()
+  val previewHeight = geometry.previewSize.height.toFloat()
+  return Matrix().apply {
+    setValues(
+      floatArrayOf(
+        geometry.contentSize.width / previewWidth, 0f, geometry.offsetX,
+        0f, geometry.contentSize.height / previewHeight, geometry.offsetY,
+        0f, 0f, 1f,
+      ),
+    )
+  }
+}
+
 internal fun calculatePreviewGeometry(
   bufferSize: IntSize,
   rotationDegrees: Int,

@@ -461,6 +461,7 @@ internal const val CAMERA_OPERATION_THREAD_NAME = "CameraPreview-Camera"
 internal const val CAMERA_ANALYSIS_THREAD_NAME = "CameraPreview-Analysis"
 private const val CAMERA_CALLBACK_BUFFER_COUNT = 3
 private const val MAX_PREVIEW_PIXELS = 1280 * 960
+private const val PREVIEW_QUALITY_AREA_DIVISOR = 4
 private const val AUTO_FOCUS_INTERVAL_MILLIS = 2_000L
 private const val CAMERA_SESSION_PERMIT_POLL_MILLIS = 100L
 // 避免重建时新会话在旧会话异步释放前打开相机
@@ -963,7 +964,12 @@ internal fun choosePreviewSize(
   val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
   val preferredSizes = sizes.filter { size -> size.width.toLong() * size.height <= MAX_PREVIEW_PIXELS }
     .ifEmpty { sizes }
-  return preferredSizes.minWithOrNull(
+  val largestPreferredArea = preferredSizes.maxOf { size -> size.width.toLong() * size.height }
+  val minimumPreferredArea = largestPreferredArea / PREVIEW_QUALITY_AREA_DIVISOR
+  val qualitySizes = preferredSizes.filter { size ->
+    size.width.toLong() * size.height >= minimumPreferredArea
+  }
+  return qualitySizes.minWithOrNull(
     compareBy<IntSize> { size ->
       val orientedWidth = if (isQuarterTurn) size.height else size.width
       val orientedHeight = if (isQuarterTurn) size.width else size.height
