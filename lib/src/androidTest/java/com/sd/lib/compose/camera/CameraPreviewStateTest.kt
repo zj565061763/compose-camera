@@ -111,21 +111,47 @@ class CameraPreviewStateTest {
   fun createSampledFrame_appliesCropAndRemovesPlatformMirror() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
-    state.updatePreviewLayout(IntSize(2, 2), ContentScale.FillBounds, isMirrored = true)
-    state.startSession(identity, IntSize(2, 2), rotationDegrees = 0, isMirrored = true)
-    val source = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply {
-      setPixel(0, 0, Color.RED)
-      setPixel(0, 1, Color.RED)
-      setPixel(1, 0, Color.BLUE)
-      setPixel(1, 1, Color.BLUE)
+    state.updatePreviewLayout(IntSize(2, 2), ContentScale.Crop, isMirrored = false)
+    state.startSession(identity, IntSize(4, 2), rotationDegrees = 0, isMirrored = false)
+    val source = Bitmap.createBitmap(4, 2, Bitmap.Config.ARGB_8888).apply {
+      repeat(height) { y ->
+        setPixel(0, y, Color.YELLOW)
+        setPixel(1, y, Color.BLUE)
+        setPixel(2, y, Color.GREEN)
+        setPixel(3, y, Color.RED)
+      }
     }
 
     val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = true))
 
+    assertThat(state.currentSampledFrameSourceSize(identity)).isEqualTo(IntSize(4, 2))
     assertThat(frame.rotationDegrees).isEqualTo(0)
-    assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.BLUE)
-    assertThat(frame.data.getPixel(1, 0)).isEqualTo(Color.RED)
+    assertThat(frame.data.width).isEqualTo(2)
+    assertThat(frame.data.height).isEqualTo(2)
+    assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.GREEN)
+    assertThat(frame.data.getPixel(1, 0)).isEqualTo(Color.BLUE)
     assertThat(state.createTransformToPreview(frame)).isNotNull()
+    frame.data.recycle()
+    source.recycle()
+  }
+
+  @Test
+  fun createSampledFrame_fitPlacesContentInsidePreview() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(4, 4), ContentScale.Fit, isMirrored = false)
+    state.startSession(identity, IntSize(4, 2), rotationDegrees = 0, isMirrored = false)
+    val source = Bitmap.createBitmap(4, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+
+    val frame = checkNotNull(state.createSampledFrame(source, identity, isPreviewMirrored = false))
+
+    assertThat(state.currentSampledFrameSourceSize(identity)).isEqualTo(IntSize(4, 2))
+    assertThat(frame.data.width).isEqualTo(4)
+    assertThat(frame.data.height).isEqualTo(4)
+    assertThat(frame.data.getPixel(0, 0)).isEqualTo(Color.TRANSPARENT)
+    assertThat(frame.data.getPixel(0, 1)).isEqualTo(Color.RED)
+    assertThat(frame.data.getPixel(3, 2)).isEqualTo(Color.RED)
+    assertThat(frame.data.getPixel(3, 3)).isEqualTo(Color.TRANSPARENT)
     frame.data.recycle()
     source.recycle()
   }
@@ -550,6 +576,43 @@ class CameraPreviewStateTest {
     dispatcher.close()
     assertThat(error.get()).isNull()
     assertThat(capturedIdentities).containsExactly(firstIdentity, latestIdentity).inOrder()
+  }
+
+  @Test
+  fun sampledFrameDispatcher_restartDiscardsPreviousCaptureBeforeCallback() {
+    val now = AtomicLong(1_000)
+    val captureStarted = CountDownLatch(1)
+    val releaseCapture = CountDownLatch(1)
+    val callback = CountDownLatch(1)
+    val bitmap = AtomicReference<Bitmap?>()
+    val error = AtomicReference<Throwable?>()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = Handler(Looper.getMainLooper()),
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        val data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).also(bitmap::set)
+        captureStarted.countDown()
+        check(releaseCapture.await(5, TimeUnit.SECONDS))
+        CameraFrame.PreviewSampled(data, rotationDegrees = 0, transformIdentity = identity)
+      },
+      onFrame = { callback.countDown() },
+      onError = error::set,
+      elapsedRealtimeMillis = now::get,
+    )
+    dispatcher.start()
+    now.set(1_100)
+    dispatcher.offer(CameraFrameTransformIdentity(), isPreviewMirrored = false)
+    assertThat(captureStarted.await(5, TimeUnit.SECONDS)).isTrue()
+
+    dispatcher.stop()
+    now.set(2_000)
+    dispatcher.start()
+    releaseCapture.countDown()
+
+    assertThat(callback.await(500, TimeUnit.MILLISECONDS)).isFalse()
+    dispatcher.close()
+    assertThat(error.get()).isNull()
+    assertThat(checkNotNull(bitmap.get()).isRecycled).isTrue()
   }
 
   @Test

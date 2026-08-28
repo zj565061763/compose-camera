@@ -639,6 +639,7 @@ internal class PreviewSampledFrameDispatcher(
   private var _started = false
   private var _closed = false
   private var _lastSampleTimeMillis = 0L
+  private var _runGeneration = 0L
   private var _capturePosted = false
   private var _processing = false
   private var _pending: PendingSampledFrame? = null
@@ -647,6 +648,7 @@ internal class PreviewSampledFrameDispatcher(
     synchronized(_lock) {
       if (_started || _closed) return
       _started = true
+      _runGeneration++
       _lastSampleTimeMillis = elapsedRealtimeMillis()
     }
   }
@@ -672,17 +674,17 @@ internal class PreviewSampledFrameDispatcher(
   }
 
   private fun capturePending() {
-    val pending = synchronized(_lock) {
+    val capture = synchronized(_lock) {
       _capturePosted = false
       if (!_started || _closed || _processing) return
-      _pending?.also {
-        _pending = null
-        _processing = true
-      }
-    } ?: return
+      val pending = _pending ?: return
+      _pending = null
+      _processing = true
+      ActiveSampledCapture(pending, _runGeneration)
+    }
 
     val frame = try {
-      captureFrame(pending.sessionIdentity, pending.isPreviewMirrored)
+      captureFrame(capture.pending.sessionIdentity, capture.pending.isPreviewMirrored)
     } catch (error: Throwable) {
       finishProcessing()
       reportFrameFailure(error, onError)
@@ -693,7 +695,7 @@ internal class PreviewSampledFrameDispatcher(
       return
     }
     try {
-      _executor.execute { process(frame) }
+      _executor.execute { process(frame, capture.runGeneration) }
     } catch (error: Throwable) {
       val failure = recycleSampledFrame(frame, error)
       finishProcessing()
@@ -701,7 +703,17 @@ internal class PreviewSampledFrameDispatcher(
     }
   }
 
-  private fun process(frame: CameraFrame.PreviewSampled) {
+  private fun process(frame: CameraFrame.PreviewSampled, runGeneration: Long) {
+    val shouldProcess = synchronized(_lock) {
+      _started && !_closed && _runGeneration == runGeneration
+    }
+    if (!shouldProcess) {
+      val failure = recycleSampledFrame(frame)
+      finishProcessing()
+      reportFrameFailure(failure, onError)
+      return
+    }
+
     var failure: Throwable? = null
     try {
       onFrame(frame)
@@ -826,6 +838,11 @@ private data class PendingCameraFrame(
 private data class PendingSampledFrame(
   val sessionIdentity: CameraFrameTransformIdentity,
   val isPreviewMirrored: Boolean,
+)
+
+private data class ActiveSampledCapture(
+  val pending: PendingSampledFrame,
+  val runGeneration: Long,
 )
 
 internal fun choosePreviewSize(

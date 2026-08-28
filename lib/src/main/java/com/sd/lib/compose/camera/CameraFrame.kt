@@ -40,8 +40,9 @@ sealed interface CameraFrame {
   /**
    * 从预览区域采样得到的帧。
    *
-   * [data] 已应用显示旋转和 [androidx.compose.ui.layout.ContentScale]，不包含镜像和预览上层内容，
-   * 只在 [FrameProcessor.PreviewSampled.onFrame] 回调期间有效；需要保留时应在回调内复制。
+   * [data] 已应用显示旋转和 [androidx.compose.ui.layout.ContentScale]，未由相机内容覆盖的区域透明；
+   * 不包含镜像和预览上层内容，只在 [FrameProcessor.PreviewSampled.onFrame] 回调期间有效。
+   * 需要保留时应在回调内复制。
    */
   class PreviewSampled internal constructor(
     val data: Bitmap,

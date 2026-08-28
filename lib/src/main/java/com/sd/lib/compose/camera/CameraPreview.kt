@@ -149,7 +149,8 @@ fun CameraPreview(
           )
         },
         captureSampledFrame = captureSampledFrame@ { sessionIdentity, isPreviewMirrored ->
-          val source = textureView.bitmap ?: return@captureSampledFrame null
+          val sourceSize = state.currentSampledFrameSourceSize(sessionIdentity) ?: return@captureSampledFrame null
+          val source = textureView.getBitmap(sourceSize.width, sourceSize.height) ?: return@captureSampledFrame null
           try {
             state.createSampledFrame(source, sessionIdentity, isPreviewMirrored)
           } finally {

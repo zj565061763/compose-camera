@@ -1,6 +1,6 @@
 # Camera Library Review Notes
 
-本文记录截至 2026-08-27 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
+本文记录截至 2026-08-28 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
 
 ## 产品边界
 
@@ -19,7 +19,7 @@
 - `frameProcessor` 默认为 `FrameProcessor.None`。`Preview` 输出 NV21 数据，`PreviewSampled` 按间隔输出预览区域截图。
 - `CameraFrame.Preview.data` 和 `CameraFrame.PreviewSampled.data` 只保证在同步回调期间有效。允许跨回调保留的是数据副本、独立 `Bitmap` 或轻量 `CameraFrameTransformToken`。
 - `CameraFrame.Preview.toBitmap()` 返回未旋转的独立图片，转换失败时返回 `null`，不抛出普通转换异常。
-- `CameraFrame.PreviewSampled.data` 已应用显示旋转和 `ContentScale`，不包含平台镜像、目标镜像或预览上层内容，`rotationDegrees` 固定为 `0`。
+- `CameraFrame.PreviewSampled.data` 已应用显示旋转和 `ContentScale`，未由相机内容覆盖的区域透明；不包含平台镜像、目标镜像或预览上层内容，`rotationDegrees` 固定为 `0`。
 - `mirrorMode` 只影响预览和坐标矩阵，不修改帧数据。
 - `displayRotation == null` 时监听当前 View 所在显示器的旋转；显式值必须是 `Surface.ROTATION_*`。
 - 库 Manifest 声明 `CAMERA` 权限和可选相机硬件；应用仍负责运行时授权，并且只能在授权后组合 `CameraPreview`。

@@ -8,7 +8,7 @@ implementation("io.github.zj565061763.android:compose-camera:$version")
 
 ## 帧处理
 
-`CameraPreview` 默认不产生分析帧。可以通过 `FrameProcessor` 直接接收 NV21 帧，或按间隔截取已应用旋转和 `ContentScale`、但不包含镜像和 overlay 的预览区域：
+`CameraPreview` 默认不产生分析帧。可以通过 `FrameProcessor` 直接接收 NV21 帧，或按间隔截取已应用旋转和 `ContentScale`、但不包含镜像和 overlay 的预览区域。缩放后未由相机内容覆盖的区域透明：
 
 ```kotlin
 CameraPreview(
