@@ -998,6 +998,25 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun nullPreviewCallback_reportsRuntimeErrorAndStopsSession() {
+    val receivedError = AtomicReference<Throwable?>()
+    val stopCount = AtomicInteger()
+
+    reportNullPreviewCallbackAndStop(
+      onError = receivedError::set,
+      stopSession = { stopCount.incrementAndGet() },
+    )
+
+    val error = receivedError.get()
+    assertThat(error).isInstanceOf(CameraPreviewException::class.java)
+    val exception = error as CameraPreviewException
+    assertThat(exception.reason).isEqualTo(CameraPreviewException.Reason.CAMERA_RUNTIME_ERROR)
+    assertThat(exception.cameraErrorCode).isNull()
+    assertThat(exception).hasMessageThat().contains("null preview callback buffer")
+    assertThat(stopCount.get()).isEqualTo(1)
+  }
+
+  @Test
   fun checkNv21PreviewFormat_rejectsDifferentConfiguredFormat() {
     checkNv21PreviewFormat(ImageFormat.NV21)
 

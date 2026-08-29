@@ -29,6 +29,28 @@ class CameraDevicesStateTest {
   }
 
   @Test
+  fun refresh_closeDuringEnumerationFailureDoesNotPublishError() {
+    val failure = IllegalStateException("enumeration")
+    val state = CameraDevicesState()
+    lateinit var loader: CameraDevicesLoader
+    loader = CameraDevicesLoader(
+      state = state,
+      cameraApi = FakeCameraDevicesApi(
+        getNumberOfCameras = {
+          loader.close()
+          throw failure
+        },
+      ),
+    )
+
+    runOnMainSync(loader::refresh)
+
+    assertThat(state.devices.value).isEmpty()
+    assertThat(state.hasLoadedDevices.value).isFalse()
+    assertThat(state.error.value).isNull()
+  }
+
+  @Test
   fun refresh_lensFailurePreservesCameraIdAndContinuesEnumeration() {
     val state = CameraDevicesState()
     val loader = CameraDevicesLoader(

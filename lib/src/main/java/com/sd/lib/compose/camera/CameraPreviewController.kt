@@ -338,7 +338,11 @@ internal class CameraPreviewController(
     camera.setPreviewCallbackWithBuffer { data, source ->
       if (_closed || _camera !== source) return@setPreviewCallbackWithBuffer
       if (!isCurrentStartRequest(generation)) {
-        source.addCallbackBuffer(data)
+        data?.also(source::addCallbackBuffer)
+        return@setPreviewCallbackWithBuffer
+      }
+      if (data == null) {
+        reportNullPreviewCallbackAndStop(onError, ::stopCamera)
         return@setPreviewCallbackWithBuffer
       }
       if (previewDispatcher != null) {
@@ -514,6 +518,17 @@ internal fun postStopThenRelease(
     }
   }
   if (!post(task)) release()
+}
+
+internal fun reportNullPreviewCallbackAndStop(
+  onError: (Throwable) -> Unit,
+  stopSession: () -> Unit,
+) {
+  try {
+    onError(nullPreviewCallbackBufferException())
+  } finally {
+    stopSession()
+  }
 }
 
 /** 延迟释放仍被相机会话使用的 SurfaceTexture。 */

@@ -51,3 +51,10 @@ internal fun cameraRuntimeException(errorCode: Int): CameraPreviewException {
     cameraErrorCode = errorCode,
   )
 }
+
+internal fun nullPreviewCallbackBufferException(): CameraPreviewException {
+  return CameraPreviewException(
+    reason = CameraPreviewException.Reason.CAMERA_RUNTIME_ERROR,
+    message = "The camera returned a null preview callback buffer.",
+  )
+}

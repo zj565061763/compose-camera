@@ -17,7 +17,7 @@ internal class CameraDevicesLoader(
     val devices = try {
       List(cameraApi.getNumberOfCameras()) { cameraId -> cameraDeviceInfo(cameraApi, cameraId) }
     } catch (error: Exception) {
-      state.publishError(error)
+      if (!_closed) state.publishError(error)
       return
     }
     if (!_closed) state.publishDevices(devices)
