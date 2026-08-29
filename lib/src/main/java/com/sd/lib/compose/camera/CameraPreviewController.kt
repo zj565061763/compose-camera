@@ -30,7 +30,7 @@ internal class CameraPreviewController(
   private val textureView: TextureView,
   private val cameraId: String?,
   private val displayRotation: Int,
-  private val previewViewSize: IntSize,
+  private val previewViewSizeProvider: () -> IntSize,
   private val transformIdentityProvider: () -> CameraFrameTransformIdentity?,
   private val onSessionStarted: (
     CameraFrameTransformIdentity,
@@ -225,9 +225,10 @@ internal class CameraPreviewController(
     }
     val parameters = camera.parameters
     parameters.previewFormat = ImageFormat.NV21
+    val currentPreviewViewSize = previewViewSizeProvider()
     val previewSize = choosePreviewSize(
       sizes = parameters.supportedPreviewSizes.map { size -> IntSize(size.width, size.height) },
-      previewViewSize = previewViewSize,
+      previewViewSize = currentPreviewViewSize,
       rotationDegrees = frameRotationDegrees,
     )
     parameters.setPreviewSize(previewSize.width, previewSize.height)

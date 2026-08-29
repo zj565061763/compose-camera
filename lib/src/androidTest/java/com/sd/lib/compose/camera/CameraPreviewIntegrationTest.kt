@@ -441,6 +441,69 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
+  fun layoutChange_lifecycleRestartSelectsPreviewSizeFromLatestLayout() {
+    assumeCameraAvailable()
+    val cameraInfo = Camera.CameraInfo().also { Camera.getCameraInfo(0, it) }
+    val rotationDegrees = calculateCameraFrameRotation(cameraInfo, Surface.ROTATION_0)
+    val supportedPreviewSizes = supportedPreviewSizes(0)
+    val normalizedRotation = normalizeRotation(rotationDegrees)
+    val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
+    val initialLayoutSize = if (isQuarterTurn) IntSize(180, 320) else IntSize(320, 180)
+    val latestLayoutSize = if (isQuarterTurn) IntSize(240, 320) else IntSize(320, 240)
+    val initialExpected = choosePreviewSize(supportedPreviewSizes, initialLayoutSize, rotationDegrees)
+    val latestExpected = choosePreviewSize(supportedPreviewSizes, latestLayoutSize, rotationDegrees)
+    assumeTrue("Camera must support different preview sizes for the tested aspect ratios.", initialExpected != latestExpected)
+
+    val lifecycleOwner = FakeLifecycleOwner()
+    val layoutSize = mutableStateOf(initialLayoutSize)
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+    _composeRule.runOnUiThread { lifecycleOwner.start() }
+
+    _composeRule.setContent {
+      val size = layoutSize.value
+      CompositionLocalProvider(LocalLifecycleOwner provides lifecycleOwner) {
+        CameraPreview(
+          modifier = Modifier.size(size.width.dp, size.height.dp),
+          state = state,
+          displayRotation = Surface.ROTATION_0,
+          onError = error::set,
+        )
+      }
+    }
+    waitForPreview(state, error)
+
+    lateinit var initialSessionIdentity: CameraFrameTransformIdentity
+    _composeRule.runOnIdle {
+      initialSessionIdentity = checkNotNull(state.currentSessionIdentity())
+      assertThat(state.previewResolution.value).isEqualTo(initialExpected)
+      layoutSize.value = latestLayoutSize
+    }
+    _composeRule.waitForIdle()
+    _composeRule.runOnIdle {
+      assertThat(state.currentSessionIdentity()).isSameInstanceAs(initialSessionIdentity)
+      assertThat(state.previewResolution.value).isEqualTo(initialExpected)
+    }
+
+    _composeRule.runOnUiThread { lifecycleOwner.stop() }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      error.get() != null || state.previewResolution.value == IntSize.Zero
+    }
+    _composeRule.runOnUiThread { lifecycleOwner.start() }
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      val currentSessionIdentity = state.currentSessionIdentity()
+      error.get() != null || (
+        currentSessionIdentity != null &&
+          currentSessionIdentity !== initialSessionIdentity &&
+          state.createCurrentTextureViewTransform(currentSessionIdentity) != null
+      )
+    }
+
+    assertThat(error.get()).isNull()
+    assertThat(state.previewResolution.value).isEqualTo(latestExpected)
+  }
+
+  @Test
   fun missingCameraId_reportsErrorWithoutFallback() {
     val state = CameraPreviewState()
     val error = AtomicReference<Throwable?>()
@@ -577,7 +640,7 @@ class CameraPreviewIntegrationTest {
         textureView = textureView,
         cameraId = null,
         displayRotation = Surface.ROTATION_0,
-        previewViewSize = IntSize(240, 240),
+        previewViewSizeProvider = { IntSize(240, 240) },
         transformIdentityProvider = { null },
         onSessionStarted = { _, _, _, _ -> error("Camera session must not start.") },
         onPreviewFrameAvailable = { error("Preview frame must not be published.") },
@@ -617,7 +680,7 @@ class CameraPreviewIntegrationTest {
         textureView = textureView,
         cameraId = null,
         displayRotation = Surface.ROTATION_0,
-        previewViewSize = IntSize(240, 240),
+        previewViewSizeProvider = { IntSize(240, 240) },
         transformIdentityProvider = { null },
         onSessionStarted = { _, _, _, _ -> error("Camera session must not start.") },
         onPreviewFrameAvailable = { error("Preview frame must not be published.") },
@@ -677,6 +740,15 @@ class CameraPreviewIntegrationTest {
 
   private fun assumeCameraAvailable() {
     assumeTrue(Camera.getNumberOfCameras() > 0)
+  }
+
+  private fun supportedPreviewSizes(cameraId: Int): List<IntSize> {
+    val camera = Camera.open(cameraId)
+    return try {
+      camera.parameters.supportedPreviewSizes.map { size -> IntSize(size.width, size.height) }
+    } finally {
+      camera.release()
+    }
   }
 
   private fun waitForPreview(state: CameraPreviewState, error: AtomicReference<Throwable?>) {

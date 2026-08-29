@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Compose 摄像头预览。
@@ -66,6 +67,8 @@ fun CameraPreview(
   val errorDispatcher = remember { MainThreadErrorDispatcher { error -> currentOnError(error) } }
   val frameProcessorMode = frameProcessor.mode
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
+  // 布局变化不重建 Controller，发布最新有效尺寸供下次开会话读取
+  val latestPreviewViewSize = remember { AtomicReference(IntSize.Zero) }
   var activePreviewMirrored by remember { mutableStateOf<Boolean?>(null) }
 
   val cameraDevices by devicesState.devices
@@ -121,7 +124,7 @@ fun CameraPreview(
         textureView = currentTextureView,
         cameraId = cameraId,
         displayRotation = effectiveDisplayRotation,
-        previewViewSize = previewSize,
+        previewViewSizeProvider = latestPreviewViewSize::get,
         transformIdentityProvider = state::currentTransformIdentity,
         onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
           activePreviewMirrored = isPreviewMirrored
@@ -198,6 +201,7 @@ fun CameraPreview(
     targetMirrored = targetMirrored,
     onTextureViewCreated = { view -> textureView = view },
     onSizeChanged = { size ->
+      if (size.width > 0 && size.height > 0) latestPreviewViewSize.set(size)
       previewSize = size
       state.updatePreviewLayout(size, contentScale, targetMirrored)
     },

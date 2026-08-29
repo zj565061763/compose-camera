@@ -52,6 +52,7 @@
 ## 预览尺寸、旋转与镜像
 
 - Controller 优先从不超过 `1280 × 960` 像素且面积不低于最大候选四分之一的预览尺寸中，选择旋转后最接近 Compose 区域比例的尺寸；若设备没有符合上限的尺寸，则选择像素面积最小的尺寸，避免为比例匹配分配过大的相机和 NV21 缓冲区。
+- 普通布局变化只更新最新有效尺寸，不立即重建当前会话；Lifecycle 或 Surface 后续自然重开时必须按最新尺寸重新选择预览分辨率。
 - 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用任一帧处理模式且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
 - `TextureView` 保持 Compose 预览区域尺寸，并通过内容变换矩阵应用旋转后的原始帧比例和 `ContentScale`，避免 AndroidView 互操作层把相机缓冲区直接拉伸到预览区域。
 - 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
