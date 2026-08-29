@@ -228,7 +228,7 @@ class CameraPreviewStateTest {
   }
 
   @Test
-  fun takePicture_usesAttachedActionAndResetDetachesIt() {
+  fun takeScreenshot_usesAttachedActionAndResetDetachesIt() {
     val state = CameraPreviewState()
     val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
     var receivedMirrorMode: CameraMirrorMode? = null
@@ -236,19 +236,19 @@ class CameraPreviewStateTest {
       receivedMirrorMode = mirrorMode
       bitmap
     }
-    state.attachTakePictureAction(action)
+    state.attachTakeScreenshotAction(action)
 
-    val result = state.takePicture(CameraMirrorMode.OFF)
+    val result = state.takeScreenshot(CameraMirrorMode.OFF)
 
     assertThat(result).isSameInstanceAs(bitmap)
     assertThat(receivedMirrorMode).isEqualTo(CameraMirrorMode.OFF)
     state.reset()
-    assertThat(state.takePicture()).isNull()
+    assertThat(state.takeScreenshot()).isNull()
     bitmap.recycle()
   }
 
   @Test
-  fun capturePreviewPicture_appliesRequestedMirrorModeToPixels() {
+  fun capturePreviewScreenshot_appliesRequestedMirrorModeToPixels() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(4, 2), ContentScale.FillBounds, isMirrored = true)
@@ -263,7 +263,7 @@ class CameraPreviewStateTest {
 
     fun capture(mirrorMode: CameraMirrorMode): Bitmap {
       return checkNotNull(
-        capturePreviewPicture(
+        capturePreviewScreenshot(
           state = state,
           mirrorMode = mirrorMode,
           captureBitmap = { width, height ->
@@ -296,7 +296,7 @@ class CameraPreviewStateTest {
   }
 
   @Test
-  fun capturePreviewPicture_rearCameraOnMirrorsPixels() {
+  fun capturePreviewScreenshot_rearCameraOnMirrorsPixels() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(2, 2), ContentScale.FillBounds, isMirrored = false)
@@ -310,7 +310,7 @@ class CameraPreviewStateTest {
     state.markPreviewFrameAvailable(identity)
 
     val bitmap = checkNotNull(
-      capturePreviewPicture(
+      capturePreviewScreenshot(
         state = state,
         mirrorMode = CameraMirrorMode.ON,
         captureBitmap = { width, height ->
@@ -328,7 +328,7 @@ class CameraPreviewStateTest {
   }
 
   @Test
-  fun capturePreviewPicture_layoutChangeDuringCaptureDropsAndRecyclesSource() {
+  fun capturePreviewScreenshot_layoutChangeDuringCaptureDropsAndRecyclesSource() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(4, 4), ContentScale.Crop, isMirrored = false)
@@ -336,7 +336,7 @@ class CameraPreviewStateTest {
     state.markPreviewFrameAvailable(identity)
     lateinit var source: Bitmap
 
-    val result = capturePreviewPicture(
+    val result = capturePreviewScreenshot(
       state = state,
       mirrorMode = CameraMirrorMode.OFF,
       captureBitmap = { width, height ->

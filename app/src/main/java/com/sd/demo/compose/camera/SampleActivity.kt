@@ -2,11 +2,13 @@ package com.sd.demo.compose.camera
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,7 +17,6 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -29,8 +30,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -111,8 +112,14 @@ private fun CameraContent(
   val devicesLoading by devicesState.isLoading
   var selectedCameraId by rememberSaveable { mutableStateOf<String?>(null) }
   var mirrorMode by rememberSaveable { mutableStateOf(CameraMirrorMode.AUTO) }
+  var screenshot by remember { mutableStateOf<Bitmap?>(null) }
 
   val previewResolution = state.previewResolution.value
+
+  DisposableEffect(screenshot) {
+    val currentScreenshot = screenshot
+    onDispose { currentScreenshot?.recycle() }
+  }
 
   LaunchedEffect(devices, devicesLoading) {
     if (!devicesLoading && devices.none { it.cameraId == selectedCameraId }) {
@@ -133,8 +140,7 @@ private fun CameraContent(
         CameraPreview(
           modifier = Modifier
             .fillMaxWidth(0.5f)
-            .aspectRatio(1f)
-            .clip(CircleShape),
+            .aspectRatio(1f),
           state = state,
           devicesState = devicesState,
           cameraId = selectedCamera.cameraId,
@@ -182,6 +188,26 @@ private fun CameraContent(
       },
     ) {
       Text(text = "镜像：$mirrorMode")
+    }
+
+    Button(
+      onClick = {
+        state.takeScreenshot(mirrorMode)?.also { bitmap ->
+          screenshot = bitmap
+        }
+      },
+    ) {
+      Text(text = "截图")
+    }
+
+    screenshot?.also { bitmap ->
+      Image(
+        modifier = Modifier
+          .fillMaxWidth(0.5f)
+          .aspectRatio(bitmap.width.toFloat() / bitmap.height),
+        bitmap = bitmap.asImageBitmap(),
+        contentDescription = "截图",
+      )
     }
   }
 }

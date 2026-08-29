@@ -173,11 +173,11 @@ fun CameraPreview(
     if (currentTextureView == null) {
       onDispose { }
     } else {
-      val takePictureAction: (CameraMirrorMode) -> Bitmap? = { pictureMirrorMode ->
+      val takeScreenshotAction: (CameraMirrorMode) -> Bitmap? = { screenshotMirrorMode ->
         try {
-          capturePreviewPicture(
+          capturePreviewScreenshot(
             state = state,
-            mirrorMode = pictureMirrorMode,
+            mirrorMode = screenshotMirrorMode,
             captureBitmap = { width, height -> currentTextureView.getBitmap(width, height) },
           )
         } catch (error: Exception) {
@@ -185,8 +185,8 @@ fun CameraPreview(
           null
         }
       }
-      state.attachTakePictureAction(takePictureAction)
-      onDispose { state.detachTakePictureAction(takePictureAction) }
+      state.attachTakeScreenshotAction(takeScreenshotAction)
+      onDispose { state.detachTakeScreenshotAction(takeScreenshotAction) }
     }
   }
 
@@ -260,12 +260,12 @@ internal fun capturePreviewSampledFrame(
 }
 
 @MainThread
-internal fun capturePreviewPicture(
+internal fun capturePreviewScreenshot(
   state: CameraPreviewState,
   mirrorMode: CameraMirrorMode,
   captureBitmap: (Int, Int) -> Bitmap?,
 ): Bitmap? {
-  val request = state.createPictureRequest(mirrorMode) ?: return null
+  val request = state.createScreenshotRequest(mirrorMode) ?: return null
   val source = captureBitmap(request.captureSize.width, request.captureSize.height) ?: return null
   var sourceTransferred = false
   return try {

@@ -139,7 +139,7 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
-  fun cameraPreview_takePictureReturnsOwnedPreviewBitmapAndDetachesWithPreview() {
+  fun cameraPreview_takeScreenshotReturnsOwnedPreviewBitmapAndDetachesWithPreview() {
     assumeCameraAvailable()
     val showPreview = mutableStateOf(true)
     val state = CameraPreviewState()
@@ -158,7 +158,7 @@ class CameraPreviewIntegrationTest {
 
     lateinit var bitmap: Bitmap
     _composeRule.runOnIdle {
-      bitmap = checkNotNull(state.takePicture(CameraMirrorMode.OFF))
+      bitmap = checkNotNull(state.takeScreenshot(CameraMirrorMode.OFF))
     }
 
     assertThat(error.get()).isNull()
@@ -169,7 +169,7 @@ class CameraPreviewIntegrationTest {
 
     _composeRule.runOnIdle { showPreview.value = false }
     _composeRule.waitForIdle()
-    _composeRule.runOnIdle { assertThat(state.takePicture()).isNull() }
+    _composeRule.runOnIdle { assertThat(state.takeScreenshot()).isNull() }
   }
 
   @Test

@@ -33,7 +33,7 @@ class CameraPreviewState internal constructor() {
   private val _previewResolution = mutableStateOf(IntSize.Zero)
   private val _previewTransformRevision = mutableIntStateOf(0)
   private val _retryGeneration = mutableIntStateOf(0)
-  private var _takePictureAction: ((CameraMirrorMode) -> Bitmap?)? = null
+  private var _takeScreenshotAction: ((CameraMirrorMode) -> Bitmap?)? = null
 
   /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero]。 */
   val previewResolution: State<IntSize> = _previewResolution
@@ -45,8 +45,8 @@ class CameraPreviewState internal constructor() {
    * 预览尚未产生有效帧、已经离开组合或发生普通截图异常时返回 `null`；截图异常同时通过 [CameraPreview] 的 `onError` 报告。
    */
   @MainThread
-  fun takePicture(mirrorMode: CameraMirrorMode = CameraMirrorMode.AUTO): Bitmap? {
-    return _takePictureAction?.invoke(mirrorMode)
+  fun takeScreenshot(mirrorMode: CameraMirrorMode = CameraMirrorMode.AUTO): Bitmap? {
+    return _takeScreenshotAction?.invoke(mirrorMode)
   }
 
   /** 在外部条件恢复后关闭并重新创建当前相机会话 */
@@ -149,7 +149,7 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
-  internal fun createPictureRequest(mirrorMode: CameraMirrorMode): PreviewBitmapRequest? {
+  internal fun createScreenshotRequest(mirrorMode: CameraMirrorMode): PreviewBitmapRequest? {
     val config = _transformConfig.get()
     val sessionIdentity = config.sessionIdentity ?: return null
     if (!config.isPreviewFrameAvailable) return null
@@ -252,13 +252,13 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
-  internal fun attachTakePictureAction(action: (CameraMirrorMode) -> Bitmap?) {
-    _takePictureAction = action
+  internal fun attachTakeScreenshotAction(action: (CameraMirrorMode) -> Bitmap?) {
+    _takeScreenshotAction = action
   }
 
   @MainThread
-  internal fun detachTakePictureAction(action: (CameraMirrorMode) -> Bitmap?) {
-    if (_takePictureAction === action) _takePictureAction = null
+  internal fun detachTakeScreenshotAction(action: (CameraMirrorMode) -> Bitmap?) {
+    if (_takeScreenshotAction === action) _takeScreenshotAction = null
   }
 
   @MainThread
@@ -384,7 +384,7 @@ class CameraPreviewState internal constructor() {
 
   @MainThread
   internal fun reset() {
-    _takePictureAction = null
+    _takeScreenshotAction = null
     _transformConfig.set(PreviewTransformConfig())
     _previewTransformRevision.intValue++
     _previewResolution.value = IntSize.Zero
