@@ -15,6 +15,7 @@ import android.view.Surface
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntSize
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -245,6 +246,27 @@ class CameraPreviewStateTest {
     state.reset()
     assertThat(state.takeScreenshot()).isNull()
     bitmap.recycle()
+  }
+
+  @Test
+  fun requestFocus_usesAttachedActionAndDetachesSafely() {
+    val state = CameraPreviewState()
+    val requests = AtomicInteger()
+    val action: () -> Unit = { requests.incrementAndGet() }
+    val otherAction: () -> Unit = {}
+    state.attachRequestFocusAction(action)
+
+    state.requestFocus()
+    state.detachRequestFocusAction(otherAction)
+    state.requestFocus()
+
+    assertThat(requests.get()).isEqualTo(2)
+    state.detachRequestFocusAction(action)
+    state.requestFocus()
+    state.attachRequestFocusAction(action)
+    state.reset()
+    state.requestFocus()
+    assertThat(requests.get()).isEqualTo(2)
   }
 
   @Test
@@ -731,53 +753,106 @@ class CameraPreviewStateTest {
   }
 
   @Test
-  fun periodicAutoFocus_repeatsAfterOrdinaryFailure() {
+  fun oneShotAutoFocus_coalescesRequestsWhileFocusing() {
+    val completions = mutableListOf<() -> Unit>()
     val attempts = AtomicInteger()
-    val errorReceived = CountDownLatch(1)
-    val focusSucceeded = CountDownLatch(1)
     val error = AtomicReference<Throwable?>()
-    val firstFailure = IllegalStateException("focus")
-    val periodicAutoFocus = PeriodicAutoFocus(
-      handler = Handler(Looper.getMainLooper()),
-      intervalMillis = 10,
-      focus = {
-        if (attempts.incrementAndGet() == 1) throw firstFailure
-        focusSucceeded.countDown()
-      },
-      onError = { failure ->
-        error.set(failure)
-        errorReceived.countDown()
-      },
-    )
+    lateinit var autoFocus: OneShotAutoFocus
 
-    periodicAutoFocus.start()
+    runOnMainSync {
+      autoFocus = OneShotAutoFocus(
+        handler = Handler(Looper.getMainLooper()),
+        focus = { onComplete ->
+          attempts.incrementAndGet()
+          completions += onComplete
+        },
+        onError = error::set,
+      )
 
-    assertThat(errorReceived.await(5, TimeUnit.SECONDS)).isTrue()
-    assertThat(focusSucceeded.await(5, TimeUnit.SECONDS)).isTrue()
-    periodicAutoFocus.close()
-    assertThat(error.get()).isSameInstanceAs(firstFailure)
-    assertThat(attempts.get()).isAtLeast(2)
+      autoFocus.request()
+      autoFocus.request()
+      autoFocus.request()
+
+      assertThat(attempts.get()).isEqualTo(1)
+      completions.removeAt(0).invoke()
+      assertThat(attempts.get()).isEqualTo(2)
+      completions.removeAt(0).invoke()
+      autoFocus.close()
+    }
+
+    assertThat(attempts.get()).isEqualTo(2)
+    assertThat(error.get()).isNull()
   }
 
   @Test
-  fun periodicAutoFocus_closeDuringFocusDoesNotScheduleAgain() {
+  fun oneShotAutoFocus_timeoutStartsPendingRequest() {
     val attempts = AtomicInteger()
-    val focused = CountDownLatch(1)
-    lateinit var periodicAutoFocus: PeriodicAutoFocus
-    periodicAutoFocus = PeriodicAutoFocus(
-      handler = Handler(Looper.getMainLooper()),
-      intervalMillis = 10,
-      focus = {
-        attempts.incrementAndGet()
-        periodicAutoFocus.close()
-        focused.countDown()
-      },
-      onError = {},
-    )
+    val pendingRequestStarted = CountDownLatch(1)
+    lateinit var autoFocus: OneShotAutoFocus
 
-    periodicAutoFocus.start()
+    runOnMainSync {
+      autoFocus = OneShotAutoFocus(
+        handler = Handler(Looper.getMainLooper()),
+        timeoutMillis = 10,
+        focus = {
+          if (attempts.incrementAndGet() == 2) pendingRequestStarted.countDown()
+        },
+        onError = {},
+      )
+      autoFocus.request()
+      autoFocus.request()
+    }
 
-    assertThat(focused.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(pendingRequestStarted.await(5, TimeUnit.SECONDS)).isTrue()
+    runOnMainSync(autoFocus::close)
+    assertThat(attempts.get()).isEqualTo(2)
+  }
+
+  @Test
+  fun oneShotAutoFocus_canRetryAfterOrdinaryFailure() {
+    val attempts = AtomicInteger()
+    val error = AtomicReference<Throwable?>()
+    val firstFailure = IllegalStateException("focus")
+
+    runOnMainSync {
+      val autoFocus = OneShotAutoFocus(
+        handler = Handler(Looper.getMainLooper()),
+        focus = { onComplete ->
+          if (attempts.incrementAndGet() == 1) throw firstFailure
+          onComplete()
+        },
+        onError = error::set,
+      )
+      autoFocus.request()
+      autoFocus.request()
+      autoFocus.close()
+    }
+
+    assertThat(error.get()).isSameInstanceAs(firstFailure)
+    assertThat(attempts.get()).isEqualTo(2)
+  }
+
+  @Test
+  fun oneShotAutoFocus_closeDiscardsPendingRequestAndCompletion() {
+    val attempts = AtomicInteger()
+    lateinit var completion: () -> Unit
+
+    runOnMainSync {
+      val autoFocus = OneShotAutoFocus(
+        handler = Handler(Looper.getMainLooper()),
+        focus = { onComplete ->
+          attempts.incrementAndGet()
+          completion = onComplete
+        },
+        onError = {},
+      )
+      autoFocus.request()
+      autoFocus.request()
+      autoFocus.close()
+      completion()
+      autoFocus.request()
+    }
+
     assertThat(attempts.get()).isEqualTo(1)
   }
 
@@ -1440,6 +1515,10 @@ private fun cameraInfo(facing: Int, orientation: Int): Camera.CameraInfo {
     it.facing = facing
     it.orientation = orientation
   }
+}
+
+private fun runOnMainSync(action: () -> Unit) {
+  InstrumentationRegistry.getInstrumentation().runOnMainSync(action)
 }
 
 private fun frame(

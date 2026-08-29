@@ -11,6 +11,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.Surface
 import android.view.TextureView
+import androidx.annotation.MainThread
 import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -64,7 +65,7 @@ internal class CameraPreviewController(
   private val _cameraThread = HandlerThread(CAMERA_OPERATION_THREAD_NAME).also { it.start() }
   private val _cameraHandler = Handler(_cameraThread.looper)
   private var _camera: Camera? = null
-  private var _periodicAutoFocus: PeriodicAutoFocus? = null
+  private var _oneShotAutoFocus: OneShotAutoFocus? = null
   @Volatile
   private var _sessionIdentity: CameraFrameTransformIdentity? = null
   @Volatile
@@ -113,7 +114,9 @@ internal class CameraPreviewController(
         _cameraSurfaceTexture === surface &&
         _sessionIdentity === sessionIdentity
       ) {
+        _previewFrameGateSessionIdentity = null
         onPreviewFrameAvailable(sessionIdentity)
+        postAutoFocusRequest(sessionIdentity)
       }
     }
   }
@@ -129,6 +132,11 @@ internal class CameraPreviewController(
     textureView.surfaceTextureListener = _surfaceTextureListener
     _surfaceTexture = textureView.surfaceTexture.takeIf { textureView.isAvailable }
     updateCameraRequest()
+  }
+
+  @MainThread
+  fun requestFocus() {
+    _sessionIdentity?.also(::postAutoFocusRequest)
   }
 
   private fun updateCameraRequest(surfaceTextureToRelease: SurfaceTexture? = null) {
@@ -256,6 +264,9 @@ internal class CameraPreviewController(
     }
 
     val sessionIdentity = CameraFrameTransformIdentity().also { _sessionIdentity = it }
+    if (configuredFocusMode == Camera.Parameters.FOCUS_MODE_AUTO) {
+      configureOneShotAutoFocus(camera, sessionIdentity, generation)
+    }
     val sessionPublished = callOnMainThread {
       if (!isCurrentStartRequest(generation) || _sessionIdentity !== sessionIdentity) {
         false
@@ -297,7 +308,6 @@ internal class CameraPreviewController(
       stopCamera()
       return
     }
-    if (configuredFocusMode == Camera.Parameters.FOCUS_MODE_AUTO) startPeriodicAutoFocus(camera, generation)
   }
 
   private fun drainPendingPreviewFrame(surfaceTexture: SurfaceTexture) {
@@ -308,17 +318,37 @@ internal class CameraPreviewController(
     }
   }
 
-  private fun startPeriodicAutoFocus(camera: Camera, generation: Long) {
-    _periodicAutoFocus = PeriodicAutoFocus(
+  private fun configureOneShotAutoFocus(
+    camera: Camera,
+    sessionIdentity: CameraFrameTransformIdentity,
+    generation: Long,
+  ) {
+    _oneShotAutoFocus = OneShotAutoFocus(
       handler = _cameraHandler,
-      focus = {
-        if (_camera === camera && isCurrentStartRequest(generation)) {
+      focus = { onComplete ->
+        if (
+          _camera !== camera ||
+          _sessionIdentity !== sessionIdentity ||
+          !isCurrentStartRequest(generation)
+        ) {
+          onComplete()
+        } else {
           camera.cancelAutoFocus()
-          camera.autoFocus(null)
+          camera.autoFocus { _, _ -> onComplete() }
         }
       },
       onError = onError,
-    ).also { it.start() }
+    )
+  }
+
+  private fun postAutoFocusRequest(sessionIdentity: CameraFrameTransformIdentity) {
+    if (_closed) return
+    val request = Runnable {
+      if (!_closed && _sessionIdentity === sessionIdentity) _oneShotAutoFocus?.request()
+    }
+    if (!_cameraHandler.post(request) && !_closed) {
+      onError(IllegalStateException("The camera thread is not available for autofocus."))
+    }
   }
 
   private fun configureFrameCallback(
@@ -419,8 +449,8 @@ internal class CameraPreviewController(
     val camera = _camera
     val sessionIdentity = _sessionIdentity
     val cameraSurfaceTexture = _cameraSurfaceTexture
-    _periodicAutoFocus?.close()
-    _periodicAutoFocus = null
+    _oneShotAutoFocus?.close()
+    _oneShotAutoFocus = null
     _camera = null
     _sessionIdentity = null
     _previewFrameGateSessionIdentity = null
@@ -505,7 +535,7 @@ internal const val CAMERA_ANALYSIS_THREAD_NAME = "CameraPreview-Analysis"
 private const val CAMERA_CALLBACK_BUFFER_COUNT = 3
 private const val MAX_PREVIEW_PIXELS = 1280 * 960
 private const val PREVIEW_QUALITY_AREA_DIVISOR = 4
-private const val AUTO_FOCUS_INTERVAL_MILLIS = 2_000L
+private const val AUTO_FOCUS_TIMEOUT_MILLIS = 3_000L
 private const val CAMERA_SESSION_PERMIT_POLL_MILLIS = 100L
 // 避免重建时新会话在旧会话异步释放前打开相机
 private val CAMERA_SESSION_PERMIT = Semaphore(1, true)
@@ -607,37 +637,83 @@ private fun <T> callOnHandlerThread(handler: Handler, action: () -> T): T {
   }
 }
 
-/** 在不支持连续对焦时定期触发单次自动对焦 */
-internal class PeriodicAutoFocus(
+/** 串行执行单次自动对焦请求，忙碌期间只保留一次待处理请求 */
+internal class OneShotAutoFocus(
   private val handler: Handler,
-  private val intervalMillis: Long = AUTO_FOCUS_INTERVAL_MILLIS,
-  private val focus: () -> Unit,
+  private val timeoutMillis: Long = AUTO_FOCUS_TIMEOUT_MILLIS,
+  private val focus: (onComplete: () -> Unit) -> Unit,
   private val onError: (Throwable) -> Unit,
 ) : AutoCloseable {
-  private var _started = false
   private var _closed = false
-  private val _task = object : Runnable {
-    override fun run() {
-      if (_closed) return
+  private var _focusing = false
+  private var _pending = false
+  private var _generation = 0L
+  private var _timeoutTask: Runnable? = null
+
+  init {
+    require(timeoutMillis > 0) { "timeoutMillis must be positive." }
+  }
+
+  fun request() {
+    if (_closed) return
+    if (_focusing) {
+      _pending = true
+      return
+    }
+    startFocus()
+  }
+
+  private fun startFocus() {
+    _focusing = true
+    val generation = ++_generation
+    val timeoutTask = Runnable { finish(generation) }.also { _timeoutTask = it }
+    try {
+      focus { finishOnHandler(generation) }
+    } catch (error: Exception) {
       try {
-        focus()
-      } catch (error: Exception) {
         onError(error)
+      } finally {
+        finish(generation)
       }
-      if (!_closed) handler.postDelayed(this, intervalMillis)
+      return
+    }
+    if (_closed || !_focusing || _generation != generation) return
+    if (!handler.postDelayed(timeoutTask, timeoutMillis)) {
+      try {
+        onError(IllegalStateException("The camera thread is not available for autofocus timeout."))
+      } finally {
+        finish(generation)
+      }
     }
   }
 
-  fun start() {
-    if (_started || _closed) return
-    _started = true
-    handler.post(_task)
+  private fun finishOnHandler(generation: Long) {
+    if (Looper.myLooper() === handler.looper) {
+      finish(generation)
+    } else {
+      handler.post { finish(generation) }
+    }
+  }
+
+  private fun finish(generation: Long) {
+    if (_closed || !_focusing || _generation != generation) return
+    _timeoutTask?.also(handler::removeCallbacks)
+    _timeoutTask = null
+    _focusing = false
+    if (_pending) {
+      _pending = false
+      startFocus()
+    }
   }
 
   override fun close() {
     if (_closed) return
     _closed = true
-    handler.removeCallbacks(_task)
+    _generation++
+    _focusing = false
+    _pending = false
+    _timeoutTask?.also(handler::removeCallbacks)
+    _timeoutTask = null
   }
 }
 

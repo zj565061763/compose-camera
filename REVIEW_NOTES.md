@@ -1,6 +1,6 @@
 # Camera Library Review Notes
 
-本文记录截至 2026-08-29 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
+本文记录截至 2026-08-30 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
 
 ## 产品边界
 
@@ -23,6 +23,7 @@
 - `CameraFrame.PreviewSampled.data` 已应用显示旋转和 `ContentScale`，未由相机内容覆盖的区域透明；不包含平台镜像、目标镜像或预览上层内容，`rotationDegrees` 固定为 `0`。
 - `CameraPreview.mirrorMode` 只影响预览和坐标矩阵，不修改帧数据；`CameraPreviewState.takeScreenshot(mirrorMode)` 的参数只决定返回 Bitmap 的镜像状态。
 - `CameraPreviewState.takeScreenshot()` 必须在主线程调用；返回图片已应用显示旋转、`ContentScale` 和指定镜像模式，不包含预览上层内容。预览未产生有效帧、已离开组合或发生普通截图异常时返回 `null`，截图异常同时通过 `CameraPreview.onError` 报告；成功返回的独立 Bitmap 由调用方负责回收。
+- `CameraPreviewState.requestFocus()` 必须在主线程调用；仅当前会话采用单次自动对焦时触发请求，连续对焦、设备不支持单次自动对焦、预览未运行或已离开组合时安全忽略。
 - `displayRotation == null` 时监听当前 View 所在显示器的旋转；显式值必须是 `Surface.ROTATION_*`。
 - 库 Manifest 声明 `CAMERA` 权限和可选相机硬件；应用仍负责运行时授权，并且只能在授权后组合 `CameraPreview`。
 
@@ -47,6 +48,7 @@
 - 普通布局尺寸、`contentScale`、镜像模式、处理间隔、用户 lambda 或 `onError` lambda 实例变化不得重复打开相机。
 - 会话重建时保留上一帧已经应用的显示矩阵；启动新预览前必须在主线程消费旧生产者尚未处理的 TextureView 更新，再启用新会话首帧门控。新会话的内容矩阵和额外镜像只能在首个属于当前 Surface 和会话的 `onSurfaceTextureUpdated` 回调中同步切换，禁止遗漏首帧、误认旧缓冲、把旧帧短暂恢复为 identity 或提前套用新会话矩阵。
 - `CameraPreviewState.takeScreenshot()` 的截图入口只在对应 `CameraPreview` 组合期间有效，退出组合后必须解除，不能继续访问已经释放的 TextureView。
+- `CameraPreviewState.requestFocus()` 的对焦入口只在对应 Controller 组合期间有效，Controller 替换或退出组合后必须按入口身份解除，旧 Controller 不得清除或接收新会话的请求。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
 - Controller 在 `CameraPreview-Camera` 专用线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作。
 - Controller 只释放自己打开的相机和创建的工作线程，不得影响进程内其他相机使用方。
@@ -60,7 +62,7 @@
 - `TextureView` 保持 Compose 预览区域尺寸，并通过内容变换矩阵应用旋转后的原始帧比例和 `ContentScale`，避免 AndroidView 互操作层把相机缓冲区直接拉伸到预览区域。
 - 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
 - 平台默认镜像前置预览。额外水平翻转合并到 `TextureView` 内容矩阵，只用于补偿平台默认状态与 `CameraMirrorMode` 目标状态的差异。
-- 优先使用连续对焦模式；设备只支持 `FOCUS_MODE_AUTO` 时，预览启动后立即对焦并每两秒重新触发一次，会话停止时取消定时任务。
+- 优先使用连续对焦模式；设备只支持 `FOCUS_MODE_AUTO` 时，在当前会话首个有效预览帧触发一次单次对焦，之后仅响应 `CameraPreviewState.requestFocus()`。进行中的请求只合并保留一次，回调超时后允许后续请求继续执行；会话停止时丢弃尚未执行或迟到的回调。
 - `CameraPreviewState` 以不可变快照和 `AtomicReference` 跨线程发布变换，分析线程无锁读取。
 - 变换链为 `raw frame -> display rotation -> ContentScale -> target mirror`。
 - 新相机会话、有效布局尺寸、`contentScale` 或目标镜像变化必须使旧 transform token 失效。
@@ -95,7 +97,7 @@
 
 ## 测试与验证
 
-- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、截图像素与所有权、token 失效、尺寸选择、对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发和异常安全清理。
+- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、截图像素与所有权、token 失效、尺寸选择、显式对焦入口和单次对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发和异常安全清理。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和工作线程。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。

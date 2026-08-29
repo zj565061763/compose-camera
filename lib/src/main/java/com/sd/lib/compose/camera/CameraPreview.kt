@@ -191,7 +191,10 @@ fun CameraPreview(
         },
       )
       controller.start()
+      val requestFocusAction: () -> Unit = controller::requestFocus
+      state.attachRequestFocusAction(requestFocusAction)
       onDispose {
+        state.detachRequestFocusAction(requestFocusAction)
         failureSubscription.close()
         controller.close()
       }

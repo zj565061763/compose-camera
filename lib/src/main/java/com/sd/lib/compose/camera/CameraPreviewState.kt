@@ -37,6 +37,7 @@ class CameraPreviewState internal constructor() {
   private var _attemptIdentity: CameraPreviewAttemptIdentity? = null
   private var _failureClearingSessionIdentity: CameraFrameTransformIdentity? = null
   private var _takeScreenshotAction: ((CameraMirrorMode) -> Bitmap?)? = null
+  private var _requestFocusAction: (() -> Unit)? = null
 
   /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero]。 */
   val previewResolution: State<IntSize> = _previewResolution
@@ -53,6 +54,16 @@ class CameraPreviewState internal constructor() {
   @MainThread
   fun takeScreenshot(mirrorMode: CameraMirrorMode = CameraMirrorMode.AUTO): Bitmap? {
     return _takeScreenshotAction?.invoke(mirrorMode)
+  }
+
+  /**
+   * 请求当前预览执行一次自动对焦。
+   *
+   * 使用连续对焦、设备不支持单次自动对焦、预览未运行或已离开组合时不执行操作。
+   */
+  @MainThread
+  fun requestFocus() {
+    _requestFocusAction?.invoke()
   }
 
   /** 在外部条件恢复后关闭并重新创建当前相机会话 */
@@ -271,6 +282,16 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
+  internal fun attachRequestFocusAction(action: () -> Unit) {
+    _requestFocusAction = action
+  }
+
+  @MainThread
+  internal fun detachRequestFocusAction(action: () -> Unit) {
+    if (_requestFocusAction === action) _requestFocusAction = null
+  }
+
+  @MainThread
   internal fun updatePreviewLayout(
     previewSize: IntSize,
     contentScale: ContentScale,
@@ -445,6 +466,7 @@ class CameraPreviewState internal constructor() {
   @MainThread
   internal fun reset() {
     _takeScreenshotAction = null
+    _requestFocusAction = null
     _attemptIdentity = null
     _failureClearingSessionIdentity = null
     _failure.value = null
