@@ -115,6 +115,7 @@ private fun CameraContent(
   var screenshot by remember { mutableStateOf<Bitmap?>(null) }
 
   val previewResolution = state.previewResolution.value
+  val previewFailure by state.failure
 
   DisposableEffect(screenshot) {
     val currentScreenshot = screenshot
@@ -147,6 +148,23 @@ private fun CameraContent(
           mirrorMode = mirrorMode,
           onError = { error -> logMsg { "onError ${error.stackTraceToString()}" } },
         )
+        previewFailure?.also { error ->
+          Column(
+            modifier = Modifier
+              .align(Alignment.Center)
+              .background(Color(0xB0000000))
+              .padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+          ) {
+            Text(
+              text = error.message ?: error::class.java.simpleName,
+              color = Color.White,
+            )
+            Button(onClick = state::retry) {
+              Text(text = "重试")
+            }
+          }
+        }
       } else {
         val message = when {
           devicesState.isLoading.value -> "正在读取摄像头"

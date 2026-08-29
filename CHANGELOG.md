@@ -7,6 +7,7 @@
 - 新增 `FrameProcessor`，支持直接接收 NV21 帧或按间隔截取预览区域。
 - 新增可覆盖的 `displayRotation`，默认自动监听当前显示器旋转。
 - 新增 `CameraPreviewState.takeScreenshot()`，支持按指定 `CameraMirrorMode` 截取当前预览区域。
+- 新增 `CameraPreviewState.failure`，区分需要重建会话的当前故障和仅用于诊断的普通异常。
 
 ### ♻️ Changes
 

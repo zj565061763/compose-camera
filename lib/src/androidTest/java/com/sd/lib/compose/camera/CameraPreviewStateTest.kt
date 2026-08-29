@@ -881,6 +881,89 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun failure_onlyAcceptsCurrentAttemptAndRetryInvalidatesIt() {
+    val state = CameraPreviewState()
+    val firstAttempt = CameraPreviewAttemptIdentity()
+    val secondAttempt = CameraPreviewAttemptIdentity()
+    val firstFailure = IllegalStateException("first")
+    val lateFailure = IllegalStateException("late")
+    val secondFailure = IllegalStateException("second")
+
+    state.beginAttempt(firstAttempt)
+    state.reportFailure(firstAttempt, firstFailure)
+
+    assertThat(state.failure.value).isSameInstanceAs(firstFailure)
+
+    state.beginAttempt(secondAttempt)
+    state.reportFailure(firstAttempt, lateFailure)
+    assertThat(state.failure.value).isNull()
+
+    state.endAttempt(firstAttempt)
+    state.reportFailure(secondAttempt, secondFailure)
+    assertThat(state.failure.value).isSameInstanceAs(secondFailure)
+
+    state.retry()
+    state.reportFailure(secondAttempt, lateFailure)
+    assertThat(state.failure.value).isNull()
+  }
+
+  @Test
+  fun firstFrameOfCurrentAttemptClearsFailureAndRejectsStaleAttempt() {
+    val state = CameraPreviewState()
+    val currentAttempt = CameraPreviewAttemptIdentity()
+    val staleAttempt = CameraPreviewAttemptIdentity()
+    val sessionIdentity = CameraFrameTransformIdentity()
+    val failure = IllegalStateException("failure")
+    state.beginAttempt(currentAttempt)
+    state.reportFailure(currentAttempt, failure)
+
+    val staleStarted = state.startSession(
+      attemptIdentity = staleAttempt,
+      sessionIdentity = CameraFrameTransformIdentity(),
+      bufferSize = IntSize(320, 240),
+      rotationDegrees = 0,
+      isMirrored = false,
+    )
+    val currentStarted = state.startSession(
+      attemptIdentity = currentAttempt,
+      sessionIdentity = sessionIdentity,
+      bufferSize = IntSize(640, 480),
+      rotationDegrees = 0,
+      isMirrored = false,
+    )
+
+    assertThat(staleStarted).isFalse()
+    assertThat(currentStarted).isTrue()
+    assertThat(state.currentSessionIdentity()).isSameInstanceAs(sessionIdentity)
+    assertThat(state.failure.value).isSameInstanceAs(failure)
+
+    state.markPreviewFrameAvailable(sessionIdentity)
+
+    assertThat(state.failure.value).isNull()
+  }
+
+  @Test
+  fun failureAfterSessionStartIsNotClearedByFirstFrame() {
+    val state = CameraPreviewState()
+    val attemptIdentity = CameraPreviewAttemptIdentity()
+    val sessionIdentity = CameraFrameTransformIdentity()
+    val failure = IllegalStateException("runtime")
+    state.beginAttempt(attemptIdentity)
+    state.startSession(
+      attemptIdentity = attemptIdentity,
+      sessionIdentity = sessionIdentity,
+      bufferSize = IntSize(640, 480),
+      rotationDegrees = 0,
+      isMirrored = false,
+    )
+
+    state.reportFailure(attemptIdentity, failure)
+    state.markPreviewFrameAvailable(sessionIdentity)
+
+    assertThat(state.failure.value).isSameInstanceAs(failure)
+  }
+
+  @Test
   fun reset_clearsRetryGeneration() {
     val state = CameraPreviewState()
     state.retry()

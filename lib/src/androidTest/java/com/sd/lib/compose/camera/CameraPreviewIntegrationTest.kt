@@ -521,6 +521,7 @@ class CameraPreviewIntegrationTest {
     assertThat(error.get()).isInstanceOf(CameraPreviewException::class.java)
     assertThat((error.get() as CameraPreviewException).reason)
       .isEqualTo(CameraPreviewException.Reason.CAMERA_NOT_FOUND)
+    assertThat(state.failure.value).isSameInstanceAs(error.get())
     assertThat(state.previewResolution.value).isEqualTo(IntSize.Zero)
   }
 
@@ -646,6 +647,7 @@ class CameraPreviewIntegrationTest {
         onPreviewFrameAvailable = { error("Preview frame must not be published.") },
         frameProcessor = ActiveFrameProcessor.None,
         captureSampledFrame = { _, _ -> null },
+        onSessionFailure = receivedError::set,
         onError = receivedError::set,
         onSessionClosed = {},
       )
@@ -686,6 +688,7 @@ class CameraPreviewIntegrationTest {
         onPreviewFrameAvailable = { error("Preview frame must not be published.") },
         frameProcessor = ActiveFrameProcessor.None,
         captureSampledFrame = { _, _ -> null },
+        onSessionFailure = receivedError::set,
         onError = receivedError::set,
         onSessionClosed = {},
       )

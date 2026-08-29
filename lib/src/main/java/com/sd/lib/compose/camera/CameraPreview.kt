@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference
  * [cameraId] 是不透明的摄像头标识；为 `null` 时选择设备列表中的第一项。
  * [mirrorMode] 只影响预览和坐标矩阵，不修改帧数据。
  * [displayRotation] 为 `null` 时监听当前 View 所在显示器，也可以传入 `Surface.ROTATION_*` 覆盖系统方向。
+ * `onError` 报告全部普通异常；需要重建会话的当前故障同时发布到 [CameraPreviewState.failure]。
  * 调用方必须在组合本组件前取得 `android.permission.CAMERA` 权限。
  */
 @Composable
@@ -93,9 +94,35 @@ fun CameraPreview(
     onDispose { state.reset() }
   }
 
-  DisposableEffect(devicesState, errorDispatcher) {
+  val currentTextureView = textureView
+  val attemptIdentity = remember(
+    lifecycleOwner,
+    state,
+    devicesState,
+    cameraId,
+    effectiveDisplayRotation,
+    frameProcessorMode,
+    retryGeneration,
+    hasLoadedCameraDevices,
+    cameraDeviceKey,
+  ) { CameraPreviewAttemptIdentity() }
+  val failureDispatcher = remember(state, attemptIdentity) {
+    MainThreadErrorDispatcher { error -> state.reportFailure(attemptIdentity, error) }
+  }
+  val currentFailureDispatcher by rememberUpdatedState(failureDispatcher)
+  val currentHasLoadedCameraDevices by rememberUpdatedState(hasLoadedCameraDevices)
+
+  DisposableEffect(state, attemptIdentity) {
+    state.beginAttempt(attemptIdentity)
+    onDispose { state.endAttempt(attemptIdentity) }
+  }
+
+  DisposableEffect(state, devicesState, errorDispatcher) {
     val errorSubscription = MainThreadErrorSubscription(errorDispatcher)
-    val cameraErrorListener: (Throwable) -> Unit = errorSubscription::dispatch
+    val cameraErrorListener: (Throwable) -> Unit = { error ->
+      if (!currentHasLoadedCameraDevices) currentFailureDispatcher.dispatch(error)
+      errorSubscription.dispatch(error)
+    }
     devicesState.addErrorListener(cameraErrorListener)?.also(cameraErrorListener)
     onDispose {
       errorSubscription.close()
@@ -103,22 +130,15 @@ fun CameraPreview(
     }
   }
 
-  val currentTextureView = textureView
   DisposableEffect(
-    lifecycleOwner,
     currentTextureView,
-    state,
-    cameraId,
-    effectiveDisplayRotation,
     hasValidPreviewSize,
-    frameProcessorMode,
-    retryGeneration,
-    hasLoadedCameraDevices,
-    cameraDeviceKey,
+    attemptIdentity,
   ) {
     if (currentTextureView == null || !hasValidPreviewSize || !hasLoadedCameraDevices) {
       onDispose { }
     } else {
+      val failureSubscription = MainThreadErrorSubscription(failureDispatcher)
       val controller = CameraPreviewController(
         lifecycleOwner = lifecycleOwner,
         textureView = currentTextureView,
@@ -127,14 +147,16 @@ fun CameraPreview(
         previewViewSizeProvider = latestPreviewViewSize::get,
         transformIdentityProvider = state::currentTransformIdentity,
         onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
-          activePreviewMirrored = isPreviewMirrored
-          state.startSession(
+          val started = state.startSession(
+            attemptIdentity = attemptIdentity,
             sessionIdentity = sessionIdentity,
             bufferSize = bufferSize,
             rotationDegrees = rotationDegrees,
             isPreviewMirrored = isPreviewMirrored,
             isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
           )
+          if (started) activePreviewMirrored = isPreviewMirrored
+          started
         },
         onPreviewFrameAvailable = { sessionIdentity ->
           state.markPreviewFrameAvailable(sessionIdentity)?.also(currentTextureView::setTransform)
@@ -161,6 +183,7 @@ fun CameraPreview(
             captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
           )
         },
+        onSessionFailure = failureSubscription::dispatch,
         onError = errorDispatcher::dispatch,
         onSessionClosed = { sessionIdentity ->
           activePreviewMirrored = null
@@ -168,7 +191,10 @@ fun CameraPreview(
         },
       )
       controller.start()
-      onDispose { controller.close() }
+      onDispose {
+        failureSubscription.close()
+        controller.close()
+      }
     }
   }
 

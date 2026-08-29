@@ -31,12 +31,18 @@ fun rememberCameraPreviewState(): CameraPreviewState {
 class CameraPreviewState internal constructor() {
   private val _transformConfig = AtomicReference(PreviewTransformConfig())
   private val _previewResolution = mutableStateOf(IntSize.Zero)
+  private val _failure = mutableStateOf<Throwable?>(null)
   private val _previewTransformRevision = mutableIntStateOf(0)
   private val _retryGeneration = mutableIntStateOf(0)
+  private var _attemptIdentity: CameraPreviewAttemptIdentity? = null
+  private var _failureClearingSessionIdentity: CameraFrameTransformIdentity? = null
   private var _takeScreenshotAction: ((CameraMirrorMode) -> Bitmap?)? = null
 
   /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero]。 */
   val previewResolution: State<IntSize> = _previewResolution
+
+  /** 阻止当前预览启动或继续运行的错误，非致命异常只通过 [CameraPreview] 的 `onError` 报告。 */
+  val failure: State<Throwable?> = _failure
 
   /**
    * 截取当前预览区域，并按照 [mirrorMode] 决定返回图片的镜像状态。
@@ -52,6 +58,9 @@ class CameraPreviewState internal constructor() {
   /** 在外部条件恢复后关闭并重新创建当前相机会话 */
   @MainThread
   fun retry() {
+    _attemptIdentity = null
+    _failureClearingSessionIdentity = null
+    _failure.value = null
     _retryGeneration.intValue++
   }
 
@@ -292,6 +301,51 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
+  internal fun beginAttempt(attemptIdentity: CameraPreviewAttemptIdentity) {
+    _attemptIdentity = attemptIdentity
+    _failureClearingSessionIdentity = null
+    _failure.value = null
+  }
+
+  @MainThread
+  internal fun reportFailure(
+    attemptIdentity: CameraPreviewAttemptIdentity,
+    error: Throwable,
+  ) {
+    if (_attemptIdentity !== attemptIdentity) return
+    _failureClearingSessionIdentity = null
+    _failure.value = error
+  }
+
+  @MainThread
+  internal fun endAttempt(attemptIdentity: CameraPreviewAttemptIdentity) {
+    if (_attemptIdentity !== attemptIdentity) return
+    _attemptIdentity = null
+    _failureClearingSessionIdentity = null
+    _failure.value = null
+  }
+
+  @MainThread
+  internal fun startSession(
+    attemptIdentity: CameraPreviewAttemptIdentity,
+    sessionIdentity: CameraFrameTransformIdentity,
+    bufferSize: IntSize,
+    rotationDegrees: Int,
+    isPreviewMirrored: Boolean = false,
+    isMirrored: Boolean,
+  ): Boolean {
+    if (_attemptIdentity !== attemptIdentity) return false
+    startSession(
+      sessionIdentity = sessionIdentity,
+      bufferSize = bufferSize,
+      rotationDegrees = rotationDegrees,
+      isPreviewMirrored = isPreviewMirrored,
+      isMirrored = isMirrored,
+    )
+    return true
+  }
+
+  @MainThread
   internal fun startSession(
     sessionIdentity: CameraFrameTransformIdentity,
     bufferSize: IntSize,
@@ -318,6 +372,7 @@ class CameraPreviewState internal constructor() {
         ),
       ),
     )
+    _failureClearingSessionIdentity = sessionIdentity
     _previewTransformRevision.intValue++
     _previewResolution.value = bufferSize
   }
@@ -326,6 +381,7 @@ class CameraPreviewState internal constructor() {
   internal fun clearSession(sessionIdentity: CameraFrameTransformIdentity? = null) {
     val current = _transformConfig.get()
     if (sessionIdentity != null && current.sessionIdentity !== sessionIdentity) return
+    _failureClearingSessionIdentity = null
     _transformConfig.set(
       current.copy(
         sessionIdentity = null,
@@ -359,6 +415,10 @@ class CameraPreviewState internal constructor() {
     val current = _transformConfig.get()
     if (current.sessionIdentity !== sessionIdentity || current.isPreviewFrameAvailable) return null
     _transformConfig.set(current.copy(isPreviewFrameAvailable = true))
+    if (_failureClearingSessionIdentity === sessionIdentity) {
+      _failureClearingSessionIdentity = null
+      _failure.value = null
+    }
     _previewTransformRevision.intValue++
     return current.geometry?.let { geometry ->
       createTextureViewTransform(geometry, current.isMirrored != current.isPreviewMirrored)
@@ -385,12 +445,17 @@ class CameraPreviewState internal constructor() {
   @MainThread
   internal fun reset() {
     _takeScreenshotAction = null
+    _attemptIdentity = null
+    _failureClearingSessionIdentity = null
+    _failure.value = null
     _transformConfig.set(PreviewTransformConfig())
     _previewTransformRevision.intValue++
     _previewResolution.value = IntSize.Zero
     _retryGeneration.intValue = 0
   }
 }
+
+internal class CameraPreviewAttemptIdentity
 
 private data class PreviewTransformConfig(
   val sessionIdentity: CameraFrameTransformIdentity? = null,

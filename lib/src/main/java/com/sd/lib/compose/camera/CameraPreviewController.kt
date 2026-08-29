@@ -37,13 +37,14 @@ internal class CameraPreviewController(
     IntSize,
     Int,
     Boolean,
-  ) -> Unit,
+  ) -> Boolean,
   private val onPreviewFrameAvailable: (CameraFrameTransformIdentity) -> Unit,
   frameProcessor: ActiveFrameProcessor,
   private val captureSampledFrame: (
     CameraFrameTransformIdentity,
     Boolean,
   ) -> CameraFrame.PreviewSampled?,
+  private val onSessionFailure: (Throwable) -> Unit,
   private val onError: (Throwable) -> Unit,
   private val onSessionClosed: (CameraFrameTransformIdentity?) -> Unit,
 ) : AutoCloseable {
@@ -202,7 +203,7 @@ internal class CameraPreviewController(
     try {
       openCamera(resolvedCameraId, surfaceTexture, generation)
     } catch (error: Exception) {
-      if (isCurrentStartRequest(generation)) onError(cameraOpenException(resolvedCameraId, error))
+      if (isCurrentStartRequest(generation)) reportSessionFailure(cameraOpenException(resolvedCameraId, error))
       stopCamera()
     } catch (error: Error) {
       try {
@@ -249,7 +250,7 @@ internal class CameraPreviewController(
     camera.setPreviewTexture(surfaceTexture)
     camera.setErrorCallback { errorCode, source ->
       if (!_closed && _camera === source) {
-        if (isCurrentStartRequest(generation)) onError(cameraRuntimeException(errorCode))
+        if (isCurrentStartRequest(generation)) reportSessionFailure(cameraRuntimeException(errorCode))
         stopCamera()
       }
     }
@@ -265,7 +266,6 @@ internal class CameraPreviewController(
           frameRotationDegrees,
           cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT,
         )
-        true
       }
     }
     if (!sessionPublished) {
@@ -343,7 +343,7 @@ internal class CameraPreviewController(
         return@setPreviewCallbackWithBuffer
       }
       if (data == null) {
-        reportNullPreviewCallbackAndStop(onError, ::stopCamera)
+        reportNullPreviewCallbackAndStop(::reportSessionFailure, ::stopCamera)
         return@setPreviewCallbackWithBuffer
       }
       if (previewDispatcher != null) {
@@ -398,9 +398,14 @@ internal class CameraPreviewController(
   private fun failAndCloseFromCameraThread(error: Throwable, generation: Long) {
     _mainHandler.post {
       if (!isCurrentStartRequest(generation)) return@post
-      onError(error)
+      reportSessionFailure(error)
       close()
     }
+  }
+
+  private fun reportSessionFailure(error: Throwable) {
+    onSessionFailure(error)
+    onError(error)
   }
 
   private fun failAndClose(error: Throwable) {
