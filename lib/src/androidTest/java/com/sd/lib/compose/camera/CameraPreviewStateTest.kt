@@ -248,6 +248,29 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun copyIntoBitmapOrThrow_returnsCopiedBitmap() {
+    val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+
+    val result = copyIntoBitmapOrThrow(bitmap) { destination -> destination.eraseColor(Color.RED) }
+
+    assertThat(result).isSameInstanceAs(bitmap)
+    assertThat(result.getPixel(1, 1)).isEqualTo(Color.RED)
+    result.recycle()
+  }
+
+  @Test
+  fun copyIntoBitmapOrThrow_unchangedBitmapThrowsAndRecycles() {
+    val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+
+    val error = assertThrows(IllegalStateException::class.java) {
+      copyIntoBitmapOrThrow(bitmap) {}
+    }
+
+    assertThat(error).hasMessageThat().contains("failed to copy")
+    assertThat(bitmap.isRecycled).isTrue()
+  }
+
+  @Test
   fun capturePreviewScreenshot_appliesRequestedMirrorModeToPixels() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
@@ -1014,6 +1037,21 @@ class CameraPreviewStateTest {
     assertThat(exception.cameraErrorCode).isNull()
     assertThat(exception).hasMessageThat().contains("null preview callback buffer")
     assertThat(stopCount.get()).isEqualTo(1)
+  }
+
+  @Test
+  fun returnStalePreviewCallbackBuffer_reportsReturnFailure() {
+    val buffer = ByteArray(6)
+    val returnFailure = IllegalStateException("return failed")
+    val receivedError = AtomicReference<Throwable?>()
+
+    returnStalePreviewCallbackBuffer(
+      data = buffer,
+      returnBuffer = { throw returnFailure },
+      onError = receivedError::set,
+    )
+
+    assertThat(receivedError.get()).isSameInstanceAs(returnFailure)
   }
 
   @Test

@@ -155,7 +155,7 @@ fun CameraPreview(
             state = state,
             sessionIdentity = sessionIdentity,
             isPreviewMirrored = isPreviewMirrored,
-            captureBitmap = { width, height -> currentTextureView.getBitmap(width, height) },
+            captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
           )
         },
         onError = errorDispatcher::dispatch,
@@ -178,7 +178,7 @@ fun CameraPreview(
           capturePreviewScreenshot(
             state = state,
             mirrorMode = screenshotMirrorMode,
-            captureBitmap = { width, height -> currentTextureView.getBitmap(width, height) },
+            captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
           )
         } catch (error: Exception) {
           errorDispatcher.dispatch(error)
@@ -238,6 +238,41 @@ private fun CameraPreviewTextureView(
       .clipToBounds()
       .onSizeChanged(onSizeChanged),
   )
+}
+
+private const val TEXTURE_VIEW_COPY_MARKER = 0x01010203
+
+@MainThread
+internal fun captureTextureViewBitmap(textureView: TextureView, width: Int, height: Int): Bitmap? {
+  if (!textureView.isAvailable || width <= 0 || height <= 0) return null
+  val bitmap = Bitmap.createBitmap(
+    textureView.resources.displayMetrics,
+    width,
+    height,
+    Bitmap.Config.ARGB_8888,
+  )
+  return copyIntoBitmapOrThrow(bitmap) { destination -> textureView.getBitmap(destination) }
+}
+
+internal fun copyIntoBitmapOrThrow(
+  bitmap: Bitmap,
+  copyInto: (Bitmap) -> Unit,
+): Bitmap {
+  val markerX = bitmap.width / 2
+  val markerY = bitmap.height / 2
+  bitmap.setPixel(markerX, markerY, TEXTURE_VIEW_COPY_MARKER)
+  val storedMarker = bitmap.getPixel(markerX, markerY)
+  var succeeded = false
+  return try {
+    copyInto(bitmap)
+    check(bitmap.getPixel(markerX, markerY) != storedMarker) {
+      "TextureView failed to copy its content into the bitmap."
+    }
+    succeeded = true
+    bitmap
+  } finally {
+    if (!succeeded) bitmap.recycle()
+  }
 }
 
 @MainThread

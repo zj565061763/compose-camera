@@ -338,7 +338,7 @@ internal class CameraPreviewController(
     camera.setPreviewCallbackWithBuffer { data, source ->
       if (_closed || _camera !== source) return@setPreviewCallbackWithBuffer
       if (!isCurrentStartRequest(generation)) {
-        data?.also(source::addCallbackBuffer)
+        returnStalePreviewCallbackBuffer(data, source::addCallbackBuffer, onError)
         return@setPreviewCallbackWithBuffer
       }
       if (data == null) {
@@ -908,6 +908,16 @@ internal class PreviewSampledFrameDispatcher(
       _pending = null
     }
     _executor.shutdown()
+  }
+}
+
+internal fun returnStalePreviewCallbackBuffer(
+  data: ByteArray?,
+  returnBuffer: (ByteArray) -> Unit,
+  onError: (Throwable) -> Unit,
+) {
+  data?.also { buffer ->
+    reportFrameFailure(releaseFrameBuffer(buffer, returnBuffer), onError)
   }
 }
 
