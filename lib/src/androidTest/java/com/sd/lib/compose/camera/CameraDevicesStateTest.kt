@@ -29,6 +29,25 @@ class CameraDevicesStateTest {
   }
 
   @Test
+  fun refresh_sameEnumerationFailureNotifiesListenerForEveryAttempt() {
+    val failure = IllegalStateException("enumeration")
+    val state = CameraDevicesState()
+    val receivedErrors = mutableListOf<Throwable>()
+    val loader = CameraDevicesLoader(
+      state = state,
+      cameraApi = FakeCameraDevicesApi(getNumberOfCameras = { throw failure }),
+    )
+    runOnMainSync {
+      state.addErrorListener(receivedErrors::add)
+      loader.refresh()
+      loader.refresh()
+    }
+
+    assertThat(receivedErrors).containsExactly(failure, failure).inOrder()
+    assertThat(state.error.value).isSameInstanceAs(failure)
+  }
+
+  @Test
   fun refresh_closeDuringEnumerationFailureDoesNotPublishError() {
     val failure = IllegalStateException("enumeration")
     val state = CameraDevicesState()

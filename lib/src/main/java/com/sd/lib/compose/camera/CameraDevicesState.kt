@@ -72,22 +72,12 @@ class CameraDevicesState internal constructor() {
     _devices.value = devices
     _isLoading.value = false
     _hasLoadedDevices.value = true
-    publishErrorIfChanged(null)
+    _error.value = null
   }
 
   @MainThread
   internal fun publishError(error: Throwable) {
     _isLoading.value = false
-    publishErrorIfChanged(error)
-  }
-
-  @MainThread
-  private fun publishErrorIfChanged(error: Throwable?) {
-    if (error == null) {
-      _error.value = null
-      return
-    }
-    if (_error.value === error) return
     _error.value = error
     notifyListeners(_errorListeners.toList(), error)
   }

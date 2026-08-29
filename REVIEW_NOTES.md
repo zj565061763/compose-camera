@@ -1,6 +1,6 @@
 # Camera Library Review Notes
 
-本文记录截至 2026-08-28 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
+本文记录截至 2026-08-29 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
 
 ## 产品边界
 
@@ -16,7 +16,7 @@
 - `CameraPreviewState` 属于单个正在组合的预览，不能在多个同时存在的预览间共享。
 - `CameraDevicesState` 可以由设备选择 UI 和多个预览共享；共享设备状态不代表支持多个相机会话同时运行。
 - `CameraPreviewState.previewResolution` 表示当前会话使用的原始预览帧分辨率，不是 Compose 布局尺寸；会话未运行时为 `IntSize.Zero`。
-- `CameraPreviewState.failure` 只保存阻止当前预览启动或继续运行的当前故障；非致命异常只通过 `CameraPreview.onError` 报告。
+- `CameraPreviewState.failure` 只保存需要重新枚举设备或重建相机会话的当前故障；其他普通异常只通过 `CameraPreview.onError` 报告。
 - `frameProcessor` 默认为 `FrameProcessor.None`。`Preview` 输出 NV21 数据，`PreviewSampled` 按间隔输出预览区域截图。
 - `CameraFrame.Preview.data` 和 `CameraFrame.PreviewSampled.data` 只保证在同步回调期间有效。允许跨回调保留的是数据副本、独立 `Bitmap` 或轻量 `CameraFrameTransformToken`。
 - `CameraFrame.Preview.toBitmap()` 返回未旋转的独立图片，转换失败时返回 `null`，不抛出普通转换异常。
@@ -30,6 +30,7 @@
 
 - `rememberCameraDevicesState()` 首次组合时同步枚举一次设备。之后只有调用 `CameraDevicesState.refresh()`，或通过关联预览的 `CameraPreviewState.retry()` 触发刷新时才重新枚举。
 - 枚举失败后结束 loading 并发布错误，不做后台重试。
+- 每次枚举失败都必须通知错误监听器，即使连续失败使用同一个 `Throwable` 实例，避免 `retry()` 清除当前故障后无法重新发布。
 - 单个设备读取镜头方向失败时必须保留其 cameraId，并把 lens 发布为 `null`，不能让异常厂商 HAL 阻断整批设备。
 - 设备列表保持平台返回顺序，不按 cameraId 重新排序。
 - 成功枚举必须清除活动错误，避免后来组合的预览收到陈旧错误。
@@ -84,7 +85,7 @@
 ## 错误与清理
 
 - `onError` 通过主线程消息队列调用，确保用户回调异常位于库内部 `try/catch` 之外。
-- 导致当前预览无法启动或继续运行的故障必须同时写入 `CameraPreviewState.failure`；新会话首帧确认后清除。故障发布受当前预览尝试身份约束，旧 Controller 的迟到故障不得覆盖新尝试，首帧前发生的新故障也不得被迟到帧清除。
+- 设备枚举以及相机选择、打开、配置或运行故障必须同时写入 `CameraPreviewState.failure`；新会话首帧确认后清除。故障发布受当前预览尝试身份约束，旧 Controller 的迟到故障不得覆盖新尝试，首帧前发生的新故障也不得被迟到帧清除。
 - 自动对焦、帧处理、采样、截图、缓冲区归还、Surface 释放和普通清理异常不得写入 `CameraPreviewState.failure`，只通过 `onError` 作为诊断事件报告。
 - 设备错误订阅在退出组合后失效，已经排队但尚未执行的设备错误不得送达已释放的预览。
 - `CameraPreviewException` 区分无设备、目标不存在、打开或配置失败以及运行错误，并保留平台错误码或 cause。

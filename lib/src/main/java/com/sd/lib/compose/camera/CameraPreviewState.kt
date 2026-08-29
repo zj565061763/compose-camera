@@ -41,7 +41,7 @@ class CameraPreviewState internal constructor() {
   /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero]。 */
   val previewResolution: State<IntSize> = _previewResolution
 
-  /** 阻止当前预览启动或继续运行的错误，非致命异常只通过 [CameraPreview] 的 `onError` 报告。 */
+  /** 需要重新枚举设备或重建相机会话的当前故障，其他普通异常只通过 [CameraPreview] 的 `onError` 报告。 */
   val failure: State<Throwable?> = _failure
 
   /**
