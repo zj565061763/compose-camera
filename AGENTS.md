@@ -79,6 +79,10 @@ git diff --check
 - `app/` 只通过 `lib` 公开 API 工作，用于演示运行时权限、设备枚举、cameraId 切换、镜像切换和真机验证；不要把库逻辑放入该模块。
 - 库 Manifest 合并 CAMERA 权限，并把 camera 和 autofocus 硬件声明为可选。调用方仍必须先完成运行时授权，再组合 `CameraPreview`。
 
+## 代码审查约定
+
+- 本库只面向已经配置 Compose 的项目，调用方应自行提供 Compose 相关依赖。`lib` 将 Compose 依赖声明为 `implementation` 是有意设计；审查时不得建议改为 `api`，也不得把公开 API 使用 Compose 类型但发布 API variant 不传递 Compose 依赖列为 Bug 或风险。
+
 ## 公开 API 与状态边界
 
 - `CameraPreview` 是入口 Composable；通过 nullable cameraId、`CameraMirrorMode`、`ContentScale` 和显示旋转配置预览。
