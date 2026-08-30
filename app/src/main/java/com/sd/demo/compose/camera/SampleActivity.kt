@@ -109,8 +109,8 @@ private fun CameraContent(
   val devicesState = rememberCameraDevicesState()
 
   val devices by devicesState.devices
-  val devicesLoading by devicesState.isLoading
-  var selectedCameraId by rememberSaveable { mutableStateOf<String?>(null) }
+  var selectedCameraId by rememberSaveable { mutableStateOf(devices.firstOrNull()?.cameraId) }
+
   var mirrorMode by rememberSaveable { mutableStateOf(CameraMirrorMode.AUTO) }
   var screenshot by remember { mutableStateOf<Bitmap?>(null) }
 
@@ -122,12 +122,10 @@ private fun CameraContent(
     onDispose { currentScreenshot?.recycle() }
   }
 
-  LaunchedEffect(devices, devicesLoading) {
-    if (!devicesLoading && devices.none { it.cameraId == selectedCameraId }) {
-      selectedCameraId = devices.firstOrNull()?.cameraId
-    }
+  LaunchedEffect(devices) {
+    val device = devices.firstOrNull { it.cameraId == selectedCameraId } ?: devices.firstOrNull()
+    selectedCameraId = device?.cameraId
   }
-  val selectedCamera = devices.firstOrNull { it.cameraId == selectedCameraId }
 
   Column(
     modifier = modifier.fillMaxSize(),
@@ -137,41 +135,33 @@ private fun CameraContent(
       modifier = Modifier.fillMaxWidth(),
       contentAlignment = Alignment.Center,
     ) {
-      if (selectedCamera != null) {
-        CameraPreview(
+      CameraPreview(
+        modifier = Modifier
+          .fillMaxWidth(0.5f)
+          .aspectRatio(1f),
+        state = state,
+        devicesState = devicesState,
+        cameraId = selectedCameraId,
+        mirrorMode = mirrorMode,
+        onError = { error -> logMsg { "onError ${error.stackTraceToString()}" } },
+      )
+
+      previewFailure?.also { error ->
+        Column(
           modifier = Modifier
-            .fillMaxWidth(0.5f)
-            .aspectRatio(1f),
-          state = state,
-          devicesState = devicesState,
-          cameraId = selectedCamera.cameraId,
-          mirrorMode = mirrorMode,
-          onError = { error -> logMsg { "onError ${error.stackTraceToString()}" } },
-        )
-        previewFailure?.also { error ->
-          Column(
-            modifier = Modifier
-              .align(Alignment.Center)
-              .background(Color(0xB0000000))
-              .padding(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-          ) {
-            Text(
-              text = error.message ?: error::class.java.simpleName,
-              color = Color.White,
-            )
-            Button(onClick = state::retry) {
-              Text(text = "重试")
-            }
+            .align(Alignment.Center)
+            .background(Color(0xB0000000))
+            .padding(12.dp),
+          horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+          Text(
+            text = error.message ?: error::class.java.simpleName,
+            color = Color.White,
+          )
+          Button(onClick = state::retry) {
+            Text(text = "重试")
           }
         }
-      } else {
-        val message = when {
-          devicesState.isLoading.value -> "正在读取摄像头"
-          devicesState.error.value != null -> "读取摄像头失败"
-          else -> "未发现可用摄像头"
-        }
-        Text(text = message)
       }
 
       Text(
@@ -180,7 +170,7 @@ private fun CameraContent(
       )
     }
 
-    selectedCamera?.also { camera ->
+    devices.firstOrNull { it.cameraId == selectedCameraId }?.also { camera ->
       Text(text = "cameraId=${camera.cameraId}, lens=${camera.lens ?: "UNKNOWN"}")
     }
 
