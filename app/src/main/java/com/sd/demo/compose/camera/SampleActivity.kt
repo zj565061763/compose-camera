@@ -141,7 +141,7 @@ private fun CameraContent(
           .aspectRatio(1f),
         state = state,
         devicesState = devicesState,
-        cameraId = selectedCameraId,
+        cameraId = selectedCameraId?.takeIf { it != devices.firstOrNull()?.cameraId },
         mirrorMode = mirrorMode,
         onError = { error -> logMsg { "onError ${error.stackTraceToString()}" } },
       )
