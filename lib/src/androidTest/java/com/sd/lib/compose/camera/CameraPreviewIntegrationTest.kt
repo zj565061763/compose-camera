@@ -31,6 +31,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -170,6 +171,67 @@ class CameraPreviewIntegrationTest {
     _composeRule.runOnIdle { showPreview.value = false }
     _composeRule.waitForIdle()
     _composeRule.runOnIdle { assertThat(state.takeScreenshot()).isNull() }
+  }
+
+  @Test
+  fun cameraPreview_requestFocusFollowsCurrentControllerAndDetachesOnDispose() {
+    val state = CameraPreviewState()
+    val devicesState = CameraDevicesState()
+    val selectedCameraId = mutableStateOf("first")
+    val showPreview = mutableStateOf(true)
+    val controllers = CopyOnWriteArrayList<FakeCameraPreviewController>()
+    val controllerFactory = CameraPreviewControllerFactory { config ->
+      FakeCameraPreviewController(checkNotNull(config.cameraId)).also { controller ->
+        controllers += controller
+      }
+    }
+    _composeRule.runOnUiThread {
+      devicesState.publishDevices(
+        listOf(
+          CameraDeviceInfo(cameraId = "first", lens = CameraLens.BACK),
+          CameraDeviceInfo(cameraId = "second", lens = CameraLens.FRONT),
+        ),
+      )
+    }
+
+    _composeRule.setContent {
+      CompositionLocalProvider(LocalCameraPreviewControllerFactory provides controllerFactory) {
+        if (showPreview.value) {
+          CameraPreview(
+            modifier = Modifier.size(240.dp),
+            state = state,
+            devicesState = devicesState,
+            cameraId = selectedCameraId.value,
+          )
+        }
+      }
+    }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      controllers.singleOrNull()?.startCount?.get() == 1
+    }
+
+    val firstController = controllers.single()
+    _composeRule.runOnIdle { state.requestFocus() }
+    assertThat(firstController.focusRequestCount.get()).isEqualTo(1)
+
+    _composeRule.runOnIdle { selectedCameraId.value = "second" }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      controllers.size == 2 && firstController.closed.get() && controllers[1].startCount.get() == 1
+    }
+    val secondController = controllers[1]
+    _composeRule.runOnIdle { state.requestFocus() }
+
+    assertThat(firstController.cameraId).isEqualTo("first")
+    assertThat(firstController.focusRequestCount.get()).isEqualTo(1)
+    assertThat(secondController.cameraId).isEqualTo("second")
+    assertThat(secondController.focusRequestCount.get()).isEqualTo(1)
+
+    _composeRule.runOnIdle { showPreview.value = false }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) { secondController.closed.get() }
+    _composeRule.runOnIdle { state.requestFocus() }
+
+    assertThat(firstController.focusRequestCount.get()).isEqualTo(1)
+    assertThat(secondController.focusRequestCount.get()).isEqualTo(1)
   }
 
   @Test
@@ -845,6 +907,26 @@ private class RecordingSurfaceTexture(
   override fun release() {
     super.release()
     onRelease()
+  }
+}
+
+private class FakeCameraPreviewController(
+  val cameraId: String,
+) : CameraPreviewControllerHandle {
+  val startCount = AtomicInteger()
+  val focusRequestCount = AtomicInteger()
+  val closed = AtomicBoolean()
+
+  override fun start() {
+    startCount.incrementAndGet()
+  }
+
+  override fun requestFocus() {
+    focusRequestCount.incrementAndGet()
+  }
+
+  override fun close() {
+    closed.set(true)
   }
 }
 

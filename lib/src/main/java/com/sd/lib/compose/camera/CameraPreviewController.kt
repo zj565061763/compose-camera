@@ -48,7 +48,7 @@ internal class CameraPreviewController(
   private val onSessionFailure: (Throwable) -> Unit,
   private val onError: (Throwable) -> Unit,
   private val onSessionClosed: (CameraFrameTransformIdentity?) -> Unit,
-) : AutoCloseable {
+) : CameraPreviewControllerHandle {
   private val _mainHandler = Handler(Looper.getMainLooper())
   private val _previewFrameDispatcher = (frameProcessor as? ActiveFrameProcessor.Preview)?.let { processor ->
     CameraFrameDispatcher(processor.onFrame, onError)
@@ -69,8 +69,6 @@ internal class CameraPreviewController(
   @Volatile
   private var _sessionIdentity: CameraFrameTransformIdentity? = null
   @Volatile
-  private var _previewFrameGateSessionIdentity: CameraFrameTransformIdentity? = null
-  @Volatile
   private var _cameraSurfaceTexture: SurfaceTexture? = null
   private var _surfaceTexture: SurfaceTexture? = textureView.surfaceTexture.takeIf { textureView.isAvailable }
   private var _started = false
@@ -81,6 +79,14 @@ internal class CameraPreviewController(
   private var _hasCameraSessionPermit = false
   @Volatile
   private var _closed = false
+  private val _autoFocusCoordinator = CameraPreviewAutoFocusCoordinator(
+    post = _cameraHandler::post,
+    currentSessionIdentity = { _sessionIdentity },
+    isClosed = { _closed },
+    requestAutoFocus = { _oneShotAutoFocus?.request() },
+    onPreviewFrameAvailable = onPreviewFrameAvailable,
+    onError = onError,
+  )
 
   private val _lifecycleObserver = LifecycleEventObserver { _, event ->
     when (event) {
@@ -108,20 +114,15 @@ internal class CameraPreviewController(
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-      val sessionIdentity = _previewFrameGateSessionIdentity ?: return
-      if (
-        !_closed && _shouldRun &&
-        _cameraSurfaceTexture === surface &&
-        _sessionIdentity === sessionIdentity
-      ) {
-        _previewFrameGateSessionIdentity = null
-        onPreviewFrameAvailable(sessionIdentity)
-        postAutoFocusRequest(sessionIdentity)
-      }
+      _autoFocusCoordinator.onSurfaceTextureUpdated(
+        isActive = !_closed && _shouldRun,
+        isCurrentSurface = _cameraSurfaceTexture === surface,
+      )
     }
   }
 
-  fun start() {
+  @MainThread
+  override fun start() {
     if (_started || _closed) return
     _started = true
     if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
@@ -135,8 +136,8 @@ internal class CameraPreviewController(
   }
 
   @MainThread
-  fun requestFocus() {
-    _sessionIdentity?.also(::postAutoFocusRequest)
+  override fun requestFocus() {
+    _autoFocusCoordinator.requestCurrentSession()
   }
 
   private fun updateCameraRequest(surfaceTextureToRelease: SurfaceTexture? = null) {
@@ -302,7 +303,7 @@ internal class CameraPreviewController(
       return
     }
     // 先清空旧生产者尚未消费的更新，再启用新会话首帧门控，避免漏掉同步提交的首帧
-    _previewFrameGateSessionIdentity = sessionIdentity
+    _autoFocusCoordinator.armFirstPreviewFrame(sessionIdentity)
     camera.startPreview()
     if (_camera !== camera || !isCurrentStartRequest(generation)) {
       stopCamera()
@@ -339,16 +340,6 @@ internal class CameraPreviewController(
       },
       onError = onError,
     )
-  }
-
-  private fun postAutoFocusRequest(sessionIdentity: CameraFrameTransformIdentity) {
-    if (_closed) return
-    val request = Runnable {
-      if (!_closed && _sessionIdentity === sessionIdentity) _oneShotAutoFocus?.request()
-    }
-    if (!_cameraHandler.post(request) && !_closed) {
-      onError(IllegalStateException("The camera thread is not available for autofocus."))
-    }
   }
 
   private fun configureFrameCallback(
@@ -453,7 +444,7 @@ internal class CameraPreviewController(
     _oneShotAutoFocus = null
     _camera = null
     _sessionIdentity = null
-    _previewFrameGateSessionIdentity = null
+    _autoFocusCoordinator.clearFirstPreviewFrame()
     _cameraSurfaceTexture = null
     _previewFrameDispatcher?.discardPending()
     _sampledFrameDispatcher?.stop()
@@ -497,6 +488,7 @@ internal class CameraPreviewController(
     }
   }
 
+  @MainThread
   override fun close() {
     if (_closed) return
     _closed = true
@@ -634,6 +626,62 @@ private fun <T> callOnHandlerThread(handler: Handler, action: () -> T): T {
   } catch (error: InterruptedException) {
     Thread.currentThread().interrupt()
     throw error
+  }
+}
+
+/** 消费当前会话首个有效预览更新，并把首帧和显式对焦请求投递到相机线程 */
+internal class CameraPreviewAutoFocusCoordinator(
+  private val post: (Runnable) -> Boolean,
+  private val currentSessionIdentity: () -> CameraFrameTransformIdentity?,
+  private val isClosed: () -> Boolean,
+  private val requestAutoFocus: () -> Unit,
+  private val onPreviewFrameAvailable: (CameraFrameTransformIdentity) -> Unit,
+  private val onError: (Throwable) -> Unit,
+) {
+  private val _lock = Any()
+  private var _firstPreviewFrameSessionIdentity: CameraFrameTransformIdentity? = null
+
+  fun armFirstPreviewFrame(sessionIdentity: CameraFrameTransformIdentity) {
+    synchronized(_lock) {
+      _firstPreviewFrameSessionIdentity = sessionIdentity
+    }
+  }
+
+  fun clearFirstPreviewFrame() {
+    synchronized(_lock) {
+      _firstPreviewFrameSessionIdentity = null
+    }
+  }
+
+  fun onSurfaceTextureUpdated(isActive: Boolean, isCurrentSurface: Boolean) {
+    val sessionIdentity = synchronized(_lock) {
+      val pendingIdentity = _firstPreviewFrameSessionIdentity
+      if (
+        pendingIdentity != null && isActive && isCurrentSurface && !isClosed() &&
+        currentSessionIdentity() === pendingIdentity
+      ) {
+        _firstPreviewFrameSessionIdentity = null
+        pendingIdentity
+      } else {
+        null
+      }
+    } ?: return
+    onPreviewFrameAvailable(sessionIdentity)
+    request(sessionIdentity)
+  }
+
+  fun requestCurrentSession() {
+    currentSessionIdentity()?.also(::request)
+  }
+
+  private fun request(sessionIdentity: CameraFrameTransformIdentity) {
+    if (isClosed()) return
+    val request = Runnable {
+      if (!isClosed() && currentSessionIdentity() === sessionIdentity) requestAutoFocus()
+    }
+    if (!post(request) && !isClosed()) {
+      onError(IllegalStateException("The camera thread is not available for autofocus."))
+    }
   }
 }
 
