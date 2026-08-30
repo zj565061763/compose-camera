@@ -9,6 +9,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
+import android.os.SystemClock
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -36,6 +37,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assume.assumeTrue
 import org.junit.Rule
@@ -174,64 +176,176 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
-  fun cameraPreview_requestFocusFollowsCurrentControllerAndDetachesOnDispose() {
+  fun cameraPreview_autoOnlyFocusesOnFirstFrameAndExplicitRequest() {
+    val autoFocusCameraId = findCameraIdUsingFocusMode(Camera.Parameters.FOCUS_MODE_AUTO)
+    assumeTrue(autoFocusCameraId != null)
+    val initialCameraThreads = activeCameraThreads()
+    val initialAnalysisThreads = activeAnalysisThreads()
     val state = CameraPreviewState()
-    val devicesState = CameraDevicesState()
-    val selectedCameraId = mutableStateOf("first")
     val showPreview = mutableStateOf(true)
-    val controllers = CopyOnWriteArrayList<FakeCameraPreviewController>()
-    val controllerFactory = CameraPreviewControllerFactory { config ->
-      FakeCameraPreviewController(checkNotNull(config.cameraId)).also { controller ->
-        controllers += controller
+    val autoFocusOperations = CopyOnWriteArrayList<RecordingCameraAutoFocusOperations>()
+    val noPeriodicFocusWindowObserved = CountDownLatch(1)
+    val error = AtomicReference<Throwable?>()
+    val autoFocusOperationsFactory = CameraAutoFocusOperationsFactory {
+      RecordingCameraAutoFocusOperations(state::isPreviewFrameAvailable).also { operations ->
+        autoFocusOperations += operations
       }
-    }
-    _composeRule.runOnUiThread {
-      devicesState.publishDevices(
-        listOf(
-          CameraDeviceInfo(cameraId = "first", lens = CameraLens.BACK),
-          CameraDeviceInfo(cameraId = "second", lens = CameraLens.FRONT),
-        ),
-      )
     }
 
     _composeRule.setContent {
-      CompositionLocalProvider(LocalCameraPreviewControllerFactory provides controllerFactory) {
+      CompositionLocalProvider(LocalCameraAutoFocusOperationsFactory provides autoFocusOperationsFactory) {
         if (showPreview.value) {
           CameraPreview(
             modifier = Modifier.size(240.dp),
             state = state,
-            devicesState = devicesState,
-            cameraId = selectedCameraId.value,
+            cameraId = checkNotNull(autoFocusCameraId),
+            onError = error::set,
+            frameProcessor = FrameProcessor.Preview {
+              val firstAutoFocusAtMillis = autoFocusOperations.singleOrNull()?.firstAutoFocusAtMillis?.get() ?: 0L
+              if (
+                firstAutoFocusAtMillis > 0L &&
+                SystemClock.elapsedRealtime() - firstAutoFocusAtMillis >= NO_PERIODIC_FOCUS_WINDOW_MILLIS
+              ) {
+                noPeriodicFocusWindowObserved.countDown()
+              }
+            },
           )
         }
       }
     }
-    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
-      controllers.singleOrNull()?.startCount?.get() == 1
+    waitForPreview(state, error)
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      error.get() != null || autoFocusOperations.singleOrNull()?.autoFocusCount?.get() == 1
     }
 
-    val firstController = controllers.single()
-    _composeRule.runOnIdle { state.requestFocus() }
-    assertThat(firstController.focusRequestCount.get()).isEqualTo(1)
+    assertThat(error.get()).isNull()
+    val operations = autoFocusOperations.single()
+    assertThat(noPeriodicFocusWindowObserved.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(operations.calls).containsExactly(
+      AutoFocusOperation.CANCEL,
+      AutoFocusOperation.AUTO_FOCUS,
+    ).inOrder()
+    assertThat(operations.previewFrameAvailableAtAutoFocus).containsExactly(true)
 
-    _composeRule.runOnIdle { selectedCameraId.value = "second" }
-    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
-      controllers.size == 2 && firstController.closed.get() && controllers[1].startCount.get() == 1
+    _composeRule.runOnIdle { state.requestFocus() }
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      error.get() != null || operations.autoFocusCount.get() == 2
     }
-    val secondController = controllers[1]
-    _composeRule.runOnIdle { state.requestFocus() }
 
-    assertThat(firstController.cameraId).isEqualTo("first")
-    assertThat(firstController.focusRequestCount.get()).isEqualTo(1)
-    assertThat(secondController.cameraId).isEqualTo("second")
-    assertThat(secondController.focusRequestCount.get()).isEqualTo(1)
+    assertThat(error.get()).isNull()
+    assertThat(operations.calls).containsExactly(
+      AutoFocusOperation.CANCEL,
+      AutoFocusOperation.AUTO_FOCUS,
+      AutoFocusOperation.CANCEL,
+      AutoFocusOperation.AUTO_FOCUS,
+    ).inOrder()
+    assertThat(operations.threadNames).containsExactly(
+      CAMERA_OPERATION_THREAD_NAME,
+      CAMERA_OPERATION_THREAD_NAME,
+      CAMERA_OPERATION_THREAD_NAME,
+      CAMERA_OPERATION_THREAD_NAME,
+    )
+    assertThat(operations.previewFrameAvailableAtAutoFocus).containsExactly(true, true)
+
+    val previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
+    _composeRule.runOnIdle { state.retry() }
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      val currentSessionIdentity = state.currentSessionIdentity()
+      error.get() != null || (
+        autoFocusOperations.size == 2 &&
+          autoFocusOperations[1].autoFocusCount.get() == 1 &&
+          currentSessionIdentity != null &&
+          currentSessionIdentity !== previousSessionIdentity &&
+          state.createCurrentTextureViewTransform(currentSessionIdentity) != null
+      )
+    }
+
+    assertThat(error.get()).isNull()
+    val retriedOperations = autoFocusOperations[1]
+    _composeRule.runOnIdle { state.requestFocus() }
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      error.get() != null || retriedOperations.autoFocusCount.get() == 2
+    }
+
+    assertThat(error.get()).isNull()
+    assertThat(operations.autoFocusCount.get()).isEqualTo(2)
+    assertThat(retriedOperations.calls).containsExactly(
+      AutoFocusOperation.CANCEL,
+      AutoFocusOperation.AUTO_FOCUS,
+      AutoFocusOperation.CANCEL,
+      AutoFocusOperation.AUTO_FOCUS,
+    ).inOrder()
+    assertThat(retriedOperations.previewFrameAvailableAtAutoFocus).containsExactly(true, true)
 
     _composeRule.runOnIdle { showPreview.value = false }
-    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) { secondController.closed.get() }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      state.previewResolution.value == IntSize.Zero &&
+        (activeCameraThreads() - initialCameraThreads).isEmpty() &&
+        (activeAnalysisThreads() - initialAnalysisThreads).isEmpty()
+    }
     _composeRule.runOnIdle { state.requestFocus() }
 
-    assertThat(firstController.focusRequestCount.get()).isEqualTo(1)
-    assertThat(secondController.focusRequestCount.get()).isEqualTo(1)
+    assertThat(operations.autoFocusCount.get()).isEqualTo(2)
+    assertThat(retriedOperations.autoFocusCount.get()).isEqualTo(2)
+  }
+
+  @Test
+  fun cameraPreview_continuousFocusIgnoresExplicitRequest() {
+    val continuousFocusCameraId = findCameraIdUsingFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE)
+      ?: findCameraIdUsingFocusMode(Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO)
+    assumeTrue(continuousFocusCameraId != null)
+    val initialCameraThreads = activeCameraThreads()
+    val initialAnalysisThreads = activeAnalysisThreads()
+    val state = CameraPreviewState()
+    val showPreview = mutableStateOf(true)
+    val autoFocusOperations = CopyOnWriteArrayList<RecordingCameraAutoFocusOperations>()
+    val explicitRequestAtMillis = AtomicLong()
+    val requestObservationWindowCompleted = CountDownLatch(1)
+    val error = AtomicReference<Throwable?>()
+    val autoFocusOperationsFactory = CameraAutoFocusOperationsFactory {
+      RecordingCameraAutoFocusOperations(state::isPreviewFrameAvailable).also { operations ->
+        autoFocusOperations += operations
+      }
+    }
+
+    _composeRule.setContent {
+      CompositionLocalProvider(LocalCameraAutoFocusOperationsFactory provides autoFocusOperationsFactory) {
+        if (showPreview.value) {
+          CameraPreview(
+            modifier = Modifier.size(240.dp),
+            state = state,
+            cameraId = checkNotNull(continuousFocusCameraId),
+            onError = error::set,
+            frameProcessor = FrameProcessor.Preview {
+              val requestAtMillis = explicitRequestAtMillis.get()
+              if (
+                requestAtMillis > 0L &&
+                SystemClock.elapsedRealtime() - requestAtMillis >= FOCUS_REQUEST_OBSERVATION_WINDOW_MILLIS
+              ) {
+                requestObservationWindowCompleted.countDown()
+              }
+            },
+          )
+        }
+      }
+    }
+    waitForPreview(state, error)
+
+    _composeRule.runOnIdle {
+      explicitRequestAtMillis.set(SystemClock.elapsedRealtime())
+      state.requestFocus()
+    }
+
+    assertThat(requestObservationWindowCompleted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(error.get()).isNull()
+    assertThat(autoFocusOperations).isEmpty()
+
+    _composeRule.runOnIdle { showPreview.value = false }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      state.previewResolution.value == IntSize.Zero &&
+        (activeCameraThreads() - initialCameraThreads).isEmpty() &&
+        (activeAnalysisThreads() - initialAnalysisThreads).isEmpty()
+    }
   }
 
   @Test
@@ -836,6 +950,25 @@ class CameraPreviewIntegrationTest {
     assumeTrue(Camera.getNumberOfCameras() > 0)
   }
 
+  private fun findCameraIdUsingFocusMode(focusMode: String): String? {
+    repeat(Camera.getNumberOfCameras()) { cameraId ->
+      val camera = try {
+        Camera.open(cameraId)
+      } catch (_: Exception) {
+        return@repeat
+      }
+      val selectedFocusMode = try {
+        chooseFocusMode(camera.parameters.supportedFocusModes)
+      } catch (_: Exception) {
+        null
+      } finally {
+        camera.release()
+      }
+      if (selectedFocusMode == focusMode) return cameraId.toString()
+    }
+    return null
+  }
+
   private fun supportedPreviewSizes(cameraId: Int): List<IntSize> {
     val camera = Camera.open(cameraId)
     return try {
@@ -898,6 +1031,8 @@ class CameraPreviewIntegrationTest {
   private companion object {
     const val FRAME_TIMEOUT_SECONDS = 15L
     const val CLEANUP_TIMEOUT_MILLIS = 5_000L
+    const val NO_PERIODIC_FOCUS_WINDOW_MILLIS = 2_500L
+    const val FOCUS_REQUEST_OBSERVATION_WINDOW_MILLIS = 500L
   }
 }
 
@@ -910,23 +1045,32 @@ private class RecordingSurfaceTexture(
   }
 }
 
-private class FakeCameraPreviewController(
-  val cameraId: String,
-) : CameraPreviewControllerHandle {
-  val startCount = AtomicInteger()
-  val focusRequestCount = AtomicInteger()
-  val closed = AtomicBoolean()
+private enum class AutoFocusOperation {
+  CANCEL,
+  AUTO_FOCUS,
+}
 
-  override fun start() {
-    startCount.incrementAndGet()
+private class RecordingCameraAutoFocusOperations(
+  private val isPreviewFrameAvailable: () -> Boolean,
+) : CameraAutoFocusOperations {
+  val calls = CopyOnWriteArrayList<AutoFocusOperation>()
+  val threadNames = CopyOnWriteArrayList<String>()
+  val previewFrameAvailableAtAutoFocus = CopyOnWriteArrayList<Boolean>()
+  val autoFocusCount = AtomicInteger()
+  val firstAutoFocusAtMillis = AtomicLong()
+
+  override fun cancelAutoFocus() {
+    calls += AutoFocusOperation.CANCEL
+    threadNames += Thread.currentThread().name
   }
 
-  override fun requestFocus() {
-    focusRequestCount.incrementAndGet()
-  }
-
-  override fun close() {
-    closed.set(true)
+  override fun autoFocus(onComplete: () -> Unit) {
+    calls += AutoFocusOperation.AUTO_FOCUS
+    threadNames += Thread.currentThread().name
+    previewFrameAvailableAtAutoFocus += isPreviewFrameAvailable()
+    autoFocusCount.incrementAndGet()
+    firstAutoFocusAtMillis.compareAndSet(0L, SystemClock.elapsedRealtime())
+    onComplete()
   }
 }
 

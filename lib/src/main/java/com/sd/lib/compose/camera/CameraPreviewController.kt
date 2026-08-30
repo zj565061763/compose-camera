@@ -48,7 +48,8 @@ internal class CameraPreviewController(
   private val onSessionFailure: (Throwable) -> Unit,
   private val onError: (Throwable) -> Unit,
   private val onSessionClosed: (CameraFrameTransformIdentity?) -> Unit,
-) : CameraPreviewControllerHandle {
+  private val autoFocusOperationsFactory: CameraAutoFocusOperationsFactory = PlatformCameraAutoFocusOperationsFactory,
+) : AutoCloseable {
   private val _mainHandler = Handler(Looper.getMainLooper())
   private val _previewFrameDispatcher = (frameProcessor as? ActiveFrameProcessor.Preview)?.let { processor ->
     CameraFrameDispatcher(processor.onFrame, onError)
@@ -122,7 +123,7 @@ internal class CameraPreviewController(
   }
 
   @MainThread
-  override fun start() {
+  fun start() {
     if (_started || _closed) return
     _started = true
     if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
@@ -136,7 +137,7 @@ internal class CameraPreviewController(
   }
 
   @MainThread
-  override fun requestFocus() {
+  fun requestFocus() {
     _autoFocusCoordinator.requestCurrentSession()
   }
 
@@ -324,6 +325,7 @@ internal class CameraPreviewController(
     sessionIdentity: CameraFrameTransformIdentity,
     generation: Long,
   ) {
+    val autoFocusOperations = autoFocusOperationsFactory.create(camera)
     _oneShotAutoFocus = OneShotAutoFocus(
       handler = _cameraHandler,
       focus = { onComplete ->
@@ -334,8 +336,8 @@ internal class CameraPreviewController(
         ) {
           onComplete()
         } else {
-          camera.cancelAutoFocus()
-          camera.autoFocus { _, _ -> onComplete() }
+          autoFocusOperations.cancelAutoFocus()
+          autoFocusOperations.autoFocus(onComplete)
         }
       },
       onError = onError,

@@ -94,6 +94,11 @@ class CameraPreviewState internal constructor() {
     return _transformConfig.get().sessionIdentity
   }
 
+  @AnyThread
+  internal fun isPreviewFrameAvailable(): Boolean {
+    return _transformConfig.get().isPreviewFrameAvailable
+  }
+
   /**
    * 把 [CameraFrame] 坐标映射到 Compose 预览区域。
    * 原始帧矩阵包含显示旋转、[ContentScale] 和目标镜像；采样帧矩阵只包含目标镜像。

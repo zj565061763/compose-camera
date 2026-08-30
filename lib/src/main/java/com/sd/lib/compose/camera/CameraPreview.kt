@@ -60,7 +60,7 @@ fun CameraPreview(
     }
   }
   val lifecycleOwner = LocalLifecycleOwner.current
-  val controllerFactory = LocalCameraPreviewControllerFactory.current
+  val autoFocusOperationsFactory = LocalCameraAutoFocusOperationsFactory.current
   var textureView by remember { mutableStateOf<TextureView?>(null) }
 
   val currentFrameProcessor by rememberUpdatedState(frameProcessor)
@@ -98,7 +98,7 @@ fun CameraPreview(
   val currentTextureView = textureView
   val attemptIdentity = remember(
     lifecycleOwner,
-    controllerFactory,
+    autoFocusOperationsFactory,
     state,
     devicesState,
     cameraId,
@@ -141,58 +141,57 @@ fun CameraPreview(
       onDispose { }
     } else {
       val failureSubscription = MainThreadErrorSubscription(failureDispatcher)
-      val controller = controllerFactory.create(
-        CameraPreviewControllerConfig(
-          lifecycleOwner = lifecycleOwner,
-          textureView = currentTextureView,
-          cameraId = cameraId,
-          displayRotation = effectiveDisplayRotation,
-          previewViewSizeProvider = latestPreviewViewSize::get,
-          transformIdentityProvider = state::currentTransformIdentity,
-          onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
-            val started = state.startSession(
-              attemptIdentity = attemptIdentity,
-              sessionIdentity = sessionIdentity,
-              bufferSize = bufferSize,
-              rotationDegrees = rotationDegrees,
-              isPreviewMirrored = isPreviewMirrored,
-              isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
-            )
-            if (started) activePreviewMirrored = isPreviewMirrored
-            started
-          },
-          onPreviewFrameAvailable = { sessionIdentity ->
-            state.markPreviewFrameAvailable(sessionIdentity)?.also(currentTextureView::setTransform)
-          },
-          frameProcessor = when (frameProcessorMode) {
-            FrameProcessorMode.NONE -> ActiveFrameProcessor.None
-            FrameProcessorMode.PREVIEW -> ActiveFrameProcessor.Preview { frame ->
-              (currentFrameProcessor as? FrameProcessor.Preview)?.onFrame?.invoke(frame)
-            }
-            FrameProcessorMode.PREVIEW_SAMPLED -> ActiveFrameProcessor.PreviewSampled(
-              intervalMillis = {
-                (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.intervalMillis ?: Long.MAX_VALUE
-              },
-              onFrame = { frame ->
-                (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.onFrame?.invoke(frame)
-              },
-            )
-          },
-          captureSampledFrame = { sessionIdentity, isPreviewMirrored ->
-            capturePreviewSampledFrame(
-              state = state,
-              sessionIdentity = sessionIdentity,
-              isPreviewMirrored = isPreviewMirrored,
-              captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
-            )
-          },
-          onSessionFailure = failureSubscription::dispatch,
-          onError = errorDispatcher::dispatch,
-          onSessionClosed = { sessionIdentity ->
-            activePreviewMirrored = null
-            state.clearSession(sessionIdentity)
-          },
-        ),
+      val controller = CameraPreviewController(
+        lifecycleOwner = lifecycleOwner,
+        textureView = currentTextureView,
+        cameraId = cameraId,
+        displayRotation = effectiveDisplayRotation,
+        previewViewSizeProvider = latestPreviewViewSize::get,
+        transformIdentityProvider = state::currentTransformIdentity,
+        onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
+          val started = state.startSession(
+            attemptIdentity = attemptIdentity,
+            sessionIdentity = sessionIdentity,
+            bufferSize = bufferSize,
+            rotationDegrees = rotationDegrees,
+            isPreviewMirrored = isPreviewMirrored,
+            isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
+          )
+          if (started) activePreviewMirrored = isPreviewMirrored
+          started
+        },
+        onPreviewFrameAvailable = { sessionIdentity ->
+          state.markPreviewFrameAvailable(sessionIdentity)?.also(currentTextureView::setTransform)
+        },
+        frameProcessor = when (frameProcessorMode) {
+          FrameProcessorMode.NONE -> ActiveFrameProcessor.None
+          FrameProcessorMode.PREVIEW -> ActiveFrameProcessor.Preview { frame ->
+            (currentFrameProcessor as? FrameProcessor.Preview)?.onFrame?.invoke(frame)
+          }
+          FrameProcessorMode.PREVIEW_SAMPLED -> ActiveFrameProcessor.PreviewSampled(
+            intervalMillis = {
+              (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.intervalMillis ?: Long.MAX_VALUE
+            },
+            onFrame = { frame ->
+              (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.onFrame?.invoke(frame)
+            },
+          )
+        },
+        captureSampledFrame = { sessionIdentity, isPreviewMirrored ->
+          capturePreviewSampledFrame(
+            state = state,
+            sessionIdentity = sessionIdentity,
+            isPreviewMirrored = isPreviewMirrored,
+            captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
+          )
+        },
+        onSessionFailure = failureSubscription::dispatch,
+        onError = errorDispatcher::dispatch,
+        onSessionClosed = { sessionIdentity ->
+          activePreviewMirrored = null
+          state.clearSession(sessionIdentity)
+        },
+        autoFocusOperationsFactory = autoFocusOperationsFactory,
       )
       controller.start()
       val requestFocusAction: () -> Unit = controller::requestFocus

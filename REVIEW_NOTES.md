@@ -99,7 +99,7 @@
 
 - `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、截图像素与所有权、token 失效、尺寸选择、首帧与 session 对焦协调、单次对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发和异常安全清理。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Controller 显式对焦绑定、Lifecycle 清理和工作线程。
+- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - 异步测试使用有超时的等待，禁止固定 `sleep`；优先使用轻量 Fake、Google Truth 和显式 `AndroidJUnit4`。
 - 真实相机测试按设备能力跳过没有相机的场景。
