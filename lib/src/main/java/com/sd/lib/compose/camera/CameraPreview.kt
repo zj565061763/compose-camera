@@ -111,17 +111,28 @@ fun CameraPreview(
   val failureDispatcher = remember(state, attemptIdentity) {
     MainThreadErrorDispatcher { error -> state.reportFailure(attemptIdentity, error) }
   }
-  val cameraDevicesRefreshDispatcher = remember(state, devicesState, attemptIdentity) {
+  // 设备枚举故障跨普通相机会话重建保留，只在设备状态或 retry 变化时失效
+  val cameraDevicesAttemptIdentity = remember(state, devicesState, retryGeneration) {
+    CameraDevicesAttemptIdentity()
+  }
+  val cameraDevicesRefreshDispatcher = remember(state, devicesState, cameraDevicesAttemptIdentity) {
     MainThreadCameraDevicesRefreshDispatcher { event ->
       when (event) {
-        CameraDevicesRefreshEvent.Success -> state.clearCameraDevicesFailure(attemptIdentity, devicesState)
+        CameraDevicesRefreshEvent.Success -> {
+          state.clearCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState)
+        }
         is CameraDevicesRefreshEvent.Failure -> {
-          state.reportCameraDevicesFailure(attemptIdentity, devicesState, event.error)
+          state.reportCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState, event.error)
         }
       }
     }
   }
   val currentCameraDevicesRefreshDispatcher by rememberUpdatedState(cameraDevicesRefreshDispatcher)
+
+  DisposableEffect(state, cameraDevicesAttemptIdentity) {
+    state.beginCameraDevicesAttempt(cameraDevicesAttemptIdentity)
+    onDispose { state.endCameraDevicesAttempt(cameraDevicesAttemptIdentity) }
+  }
 
   DisposableEffect(state, attemptIdentity) {
     state.beginAttempt(attemptIdentity)

@@ -1188,16 +1188,18 @@ class CameraPreviewStateTest {
   fun cameraDevicesRecovery_restoresActiveSessionFailure() {
     val state = CameraPreviewState()
     val attemptIdentity = CameraPreviewAttemptIdentity()
+    val cameraDevicesAttemptIdentity = CameraDevicesAttemptIdentity()
     val devicesState = CameraDevicesState()
     val sessionFailure = IllegalStateException("session")
     val devicesFailure = IllegalStateException("enumeration")
     state.beginAttempt(attemptIdentity)
+    state.beginCameraDevicesAttempt(cameraDevicesAttemptIdentity)
     state.reportFailure(attemptIdentity, sessionFailure)
 
-    state.reportCameraDevicesFailure(attemptIdentity, devicesState, devicesFailure)
+    state.reportCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState, devicesFailure)
     assertThat(state.failure.value).isSameInstanceAs(devicesFailure)
 
-    state.clearCameraDevicesFailure(attemptIdentity, devicesState)
+    state.clearCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState)
 
     assertThat(state.failure.value).isSameInstanceAs(sessionFailure)
   }
@@ -1206,13 +1208,15 @@ class CameraPreviewStateTest {
   fun firstFrameClearsSessionFailure_butPreservesCameraDevicesFailure() {
     val state = CameraPreviewState()
     val attemptIdentity = CameraPreviewAttemptIdentity()
+    val cameraDevicesAttemptIdentity = CameraDevicesAttemptIdentity()
     val sessionIdentity = CameraFrameTransformIdentity()
     val devicesState = CameraDevicesState()
     val sessionFailure = IllegalStateException("session")
     val devicesFailure = IllegalStateException("enumeration")
     state.beginAttempt(attemptIdentity)
+    state.beginCameraDevicesAttempt(cameraDevicesAttemptIdentity)
     state.reportFailure(attemptIdentity, sessionFailure)
-    state.reportCameraDevicesFailure(attemptIdentity, devicesState, devicesFailure)
+    state.reportCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState, devicesFailure)
     state.startSession(
       attemptIdentity = attemptIdentity,
       sessionIdentity = sessionIdentity,
@@ -1224,7 +1228,30 @@ class CameraPreviewStateTest {
     state.markPreviewFrameAvailable(sessionIdentity)
 
     assertThat(state.failure.value).isSameInstanceAs(devicesFailure)
-    state.clearCameraDevicesFailure(attemptIdentity, devicesState)
+    state.clearCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState)
+    assertThat(state.failure.value).isNull()
+  }
+
+  @Test
+  fun cameraDevicesFailure_survivesSessionAttemptChangeButRetryInvalidatesIt() {
+    val state = CameraPreviewState()
+    val firstAttempt = CameraPreviewAttemptIdentity()
+    val secondAttempt = CameraPreviewAttemptIdentity()
+    val cameraDevicesAttemptIdentity = CameraDevicesAttemptIdentity()
+    val devicesState = CameraDevicesState()
+    val failure = IllegalStateException("enumeration")
+    state.beginCameraDevicesAttempt(cameraDevicesAttemptIdentity)
+    state.beginAttempt(firstAttempt)
+    state.reportCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState, failure)
+
+    state.endAttempt(firstAttempt)
+    state.beginAttempt(secondAttempt)
+
+    assertThat(state.failure.value).isSameInstanceAs(failure)
+
+    state.retry()
+    state.reportCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState, failure)
+
     assertThat(state.failure.value).isNull()
   }
 

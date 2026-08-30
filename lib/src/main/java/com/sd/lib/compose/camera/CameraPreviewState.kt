@@ -35,6 +35,7 @@ class CameraPreviewState internal constructor() {
   private val _previewTransformRevision = mutableIntStateOf(0)
   private val _retryGeneration = mutableIntStateOf(0)
   private var _attemptIdentity: CameraPreviewAttemptIdentity? = null
+  private var _cameraDevicesAttemptIdentity: CameraDevicesAttemptIdentity? = null
   private var _failureClearingSessionIdentity: CameraFrameTransformIdentity? = null
   private var _sessionFailure: Throwable? = null
   private var _cameraDevicesFailure: ActiveCameraDevicesFailure? = null
@@ -73,6 +74,7 @@ class CameraPreviewState internal constructor() {
   @MainThread
   fun retry() {
     _attemptIdentity = null
+    _cameraDevicesAttemptIdentity = null
     clearFailures()
     _retryGeneration.intValue++
   }
@@ -331,7 +333,13 @@ class CameraPreviewState internal constructor() {
   @MainThread
   internal fun beginAttempt(attemptIdentity: CameraPreviewAttemptIdentity) {
     _attemptIdentity = attemptIdentity
-    clearFailures()
+    clearSessionFailure()
+  }
+
+  @MainThread
+  internal fun beginCameraDevicesAttempt(attemptIdentity: CameraDevicesAttemptIdentity) {
+    _cameraDevicesAttemptIdentity = attemptIdentity
+    clearCameraDevicesFailureState()
   }
 
   @MainThread
@@ -348,11 +356,11 @@ class CameraPreviewState internal constructor() {
 
   @MainThread
   internal fun reportCameraDevicesFailure(
-    attemptIdentity: CameraPreviewAttemptIdentity,
+    attemptIdentity: CameraDevicesAttemptIdentity,
     devicesState: CameraDevicesState,
     error: Throwable,
   ) {
-    if (_attemptIdentity !== attemptIdentity) return
+    if (_cameraDevicesAttemptIdentity !== attemptIdentity) return
     _cameraDevicesFailure = ActiveCameraDevicesFailure(devicesState, error)
     _failureSource = CameraPreviewFailureSource.CAMERA_DEVICES
     _failure.value = error
@@ -360,27 +368,28 @@ class CameraPreviewState internal constructor() {
 
   @MainThread
   internal fun clearCameraDevicesFailure(
-    attemptIdentity: CameraPreviewAttemptIdentity,
+    attemptIdentity: CameraDevicesAttemptIdentity,
     devicesState: CameraDevicesState,
   ) {
-    if (_attemptIdentity !== attemptIdentity || _cameraDevicesFailure?.devicesState !== devicesState) return
-    _cameraDevicesFailure = null
-    if (_failureSource != CameraPreviewFailureSource.CAMERA_DEVICES) return
-    val sessionFailure = _sessionFailure
-    if (sessionFailure == null) {
-      _failureSource = null
-      _failure.value = null
-    } else {
-      _failureSource = CameraPreviewFailureSource.SESSION
-      _failure.value = sessionFailure
-    }
+    if (
+      _cameraDevicesAttemptIdentity !== attemptIdentity ||
+      _cameraDevicesFailure?.devicesState !== devicesState
+    ) return
+    clearCameraDevicesFailureState()
   }
 
   @MainThread
   internal fun endAttempt(attemptIdentity: CameraPreviewAttemptIdentity) {
     if (_attemptIdentity !== attemptIdentity) return
     _attemptIdentity = null
-    clearFailures()
+    clearSessionFailure()
+  }
+
+  @MainThread
+  internal fun endCameraDevicesAttempt(attemptIdentity: CameraDevicesAttemptIdentity) {
+    if (_cameraDevicesAttemptIdentity !== attemptIdentity) return
+    _cameraDevicesAttemptIdentity = null
+    clearCameraDevicesFailureState()
   }
 
   @MainThread
@@ -515,6 +524,7 @@ class CameraPreviewState internal constructor() {
     _takeScreenshotAction = null
     _requestFocusAction = null
     _attemptIdentity = null
+    _cameraDevicesAttemptIdentity = null
     clearFailures()
     _transformConfig.set(PreviewTransformConfig())
     _previewTransformRevision.intValue++
@@ -529,9 +539,38 @@ class CameraPreviewState internal constructor() {
     _failureSource = null
     _failure.value = null
   }
+
+  private fun clearSessionFailure() {
+    _failureClearingSessionIdentity = null
+    _sessionFailure = null
+    if (_failureSource != CameraPreviewFailureSource.SESSION) return
+    val cameraDevicesFailure = _cameraDevicesFailure
+    if (cameraDevicesFailure == null) {
+      _failureSource = null
+      _failure.value = null
+    } else {
+      _failureSource = CameraPreviewFailureSource.CAMERA_DEVICES
+      _failure.value = cameraDevicesFailure.error
+    }
+  }
+
+  private fun clearCameraDevicesFailureState() {
+    _cameraDevicesFailure = null
+    if (_failureSource != CameraPreviewFailureSource.CAMERA_DEVICES) return
+    val sessionFailure = _sessionFailure
+    if (sessionFailure == null) {
+      _failureSource = null
+      _failure.value = null
+    } else {
+      _failureSource = CameraPreviewFailureSource.SESSION
+      _failure.value = sessionFailure
+    }
+  }
 }
 
 internal class CameraPreviewAttemptIdentity
+
+internal class CameraDevicesAttemptIdentity
 
 private enum class CameraPreviewFailureSource {
   SESSION,
