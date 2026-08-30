@@ -38,7 +38,9 @@ class CameraDevicesStateTest {
       cameraApi = FakeCameraDevicesApi(getNumberOfCameras = { throw failure }),
     )
     runOnMainSync {
-      state.addErrorListener(receivedErrors::add)
+      state.addRefreshListener { event ->
+        if (event is CameraDevicesRefreshEvent.Failure) receivedErrors += event.error
+      }
       loader.refresh()
       loader.refresh()
     }

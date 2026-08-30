@@ -16,6 +16,12 @@ data class CameraDeviceInfo(
   val lens: CameraLens?,
 )
 
+internal sealed interface CameraDevicesRefreshEvent {
+  data object Success : CameraDevicesRefreshEvent
+
+  data class Failure(val error: Throwable) : CameraDevicesRefreshEvent
+}
+
 /** 可用摄像头列表及其加载状态 */
 @Stable
 class CameraDevicesState internal constructor() {
@@ -24,7 +30,8 @@ class CameraDevicesState internal constructor() {
   private val _hasLoadedDevices = mutableStateOf(false)
   private val _error = mutableStateOf<Throwable?>(null)
   private var _refreshAction: (() -> Unit)? = null
-  private val _errorListeners = linkedSetOf<(Throwable) -> Unit>()
+  private var _latestRefreshEvent: CameraDevicesRefreshEvent? = null
+  private val _refreshListeners = linkedSetOf<(CameraDevicesRefreshEvent) -> Unit>()
 
   /** 最近一次枚举到的摄像头 */
   val devices: State<List<CameraDeviceInfo>> = _devices
@@ -48,18 +55,18 @@ class CameraDevicesState internal constructor() {
     _refreshAction = action
   }
 
-  /** 返回订阅前已经存在的错误，由订阅者完成一次补发。 */
+  /** 返回订阅前最近完成的刷新事件，由订阅者完成一次补发 */
   @MainThread
-  internal fun addErrorListener(
-    listener: (Throwable) -> Unit,
-  ): Throwable? {
-    _errorListeners += listener
-    return _error.value
+  internal fun addRefreshListener(
+    listener: (CameraDevicesRefreshEvent) -> Unit,
+  ): CameraDevicesRefreshEvent? {
+    _refreshListeners += listener
+    return _latestRefreshEvent
   }
 
   @MainThread
-  internal fun removeErrorListener(listener: (Throwable) -> Unit) {
-    _errorListeners -= listener
+  internal fun removeRefreshListener(listener: (CameraDevicesRefreshEvent) -> Unit) {
+    _refreshListeners -= listener
   }
 
   @MainThread
@@ -73,13 +80,18 @@ class CameraDevicesState internal constructor() {
     _isLoading.value = false
     _hasLoadedDevices.value = true
     _error.value = null
+    val event = CameraDevicesRefreshEvent.Success
+    _latestRefreshEvent = event
+    notifyListeners(_refreshListeners.toList(), event)
   }
 
   @MainThread
   internal fun publishError(error: Throwable) {
     _isLoading.value = false
     _error.value = error
-    notifyListeners(_errorListeners.toList(), error)
+    val event = CameraDevicesRefreshEvent.Failure(error)
+    _latestRefreshEvent = event
+    notifyListeners(_refreshListeners.toList(), event)
   }
 }
 

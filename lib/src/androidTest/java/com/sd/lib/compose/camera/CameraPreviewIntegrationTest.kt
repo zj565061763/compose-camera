@@ -731,6 +731,37 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
+  fun deviceRefreshFailure_afterSuccessfulEnumerationUpdatesAndClearsPreviewFailure() {
+    val state = CameraPreviewState()
+    val devicesState = CameraDevicesState()
+    val failure = IllegalStateException("enumeration")
+    val errorCount = AtomicInteger()
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(0.dp),
+        state = state,
+        devicesState = devicesState,
+        onError = { error -> if (error === failure) errorCount.incrementAndGet() },
+      )
+    }
+
+    _composeRule.runOnIdle { devicesState.publishDevices(emptyList()) }
+    _composeRule.waitForIdle()
+    _composeRule.runOnIdle { devicesState.publishError(failure) }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      state.failure.value === failure && errorCount.get() == 1
+    }
+
+    _composeRule.runOnIdle { devicesState.publishDevices(emptyList()) }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      state.failure.value == null
+    }
+
+    assertThat(devicesState.error.value).isNull()
+    assertThat(errorCount.get()).isEqualTo(1)
+  }
+
+  @Test
   fun exactCameraId_startsSelectedPreview() {
     assumeCameraAvailable()
     val cameraId = (Camera.getNumberOfCameras() - 1).toString()

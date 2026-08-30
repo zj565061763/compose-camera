@@ -1185,6 +1185,50 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun cameraDevicesRecovery_restoresActiveSessionFailure() {
+    val state = CameraPreviewState()
+    val attemptIdentity = CameraPreviewAttemptIdentity()
+    val devicesState = CameraDevicesState()
+    val sessionFailure = IllegalStateException("session")
+    val devicesFailure = IllegalStateException("enumeration")
+    state.beginAttempt(attemptIdentity)
+    state.reportFailure(attemptIdentity, sessionFailure)
+
+    state.reportCameraDevicesFailure(attemptIdentity, devicesState, devicesFailure)
+    assertThat(state.failure.value).isSameInstanceAs(devicesFailure)
+
+    state.clearCameraDevicesFailure(attemptIdentity, devicesState)
+
+    assertThat(state.failure.value).isSameInstanceAs(sessionFailure)
+  }
+
+  @Test
+  fun firstFrameClearsSessionFailure_butPreservesCameraDevicesFailure() {
+    val state = CameraPreviewState()
+    val attemptIdentity = CameraPreviewAttemptIdentity()
+    val sessionIdentity = CameraFrameTransformIdentity()
+    val devicesState = CameraDevicesState()
+    val sessionFailure = IllegalStateException("session")
+    val devicesFailure = IllegalStateException("enumeration")
+    state.beginAttempt(attemptIdentity)
+    state.reportFailure(attemptIdentity, sessionFailure)
+    state.reportCameraDevicesFailure(attemptIdentity, devicesState, devicesFailure)
+    state.startSession(
+      attemptIdentity = attemptIdentity,
+      sessionIdentity = sessionIdentity,
+      bufferSize = IntSize(640, 480),
+      rotationDegrees = 0,
+      isMirrored = false,
+    )
+
+    state.markPreviewFrameAvailable(sessionIdentity)
+
+    assertThat(state.failure.value).isSameInstanceAs(devicesFailure)
+    state.clearCameraDevicesFailure(attemptIdentity, devicesState)
+    assertThat(state.failure.value).isNull()
+  }
+
+  @Test
   fun reset_clearsRetryGeneration() {
     val state = CameraPreviewState()
     state.retry()

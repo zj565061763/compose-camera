@@ -111,8 +111,17 @@ fun CameraPreview(
   val failureDispatcher = remember(state, attemptIdentity) {
     MainThreadErrorDispatcher { error -> state.reportFailure(attemptIdentity, error) }
   }
-  val currentFailureDispatcher by rememberUpdatedState(failureDispatcher)
-  val currentHasLoadedCameraDevices by rememberUpdatedState(hasLoadedCameraDevices)
+  val cameraDevicesRefreshDispatcher = remember(state, devicesState, attemptIdentity) {
+    MainThreadCameraDevicesRefreshDispatcher { event ->
+      when (event) {
+        CameraDevicesRefreshEvent.Success -> state.clearCameraDevicesFailure(attemptIdentity, devicesState)
+        is CameraDevicesRefreshEvent.Failure -> {
+          state.reportCameraDevicesFailure(attemptIdentity, devicesState, event.error)
+        }
+      }
+    }
+  }
+  val currentCameraDevicesRefreshDispatcher by rememberUpdatedState(cameraDevicesRefreshDispatcher)
 
   DisposableEffect(state, attemptIdentity) {
     state.beginAttempt(attemptIdentity)
@@ -121,14 +130,14 @@ fun CameraPreview(
 
   DisposableEffect(state, devicesState, errorDispatcher) {
     val errorSubscription = MainThreadErrorSubscription(errorDispatcher)
-    val cameraErrorListener: (Throwable) -> Unit = { error ->
-      if (!currentHasLoadedCameraDevices) currentFailureDispatcher.dispatch(error)
-      errorSubscription.dispatch(error)
+    val refreshListener: (CameraDevicesRefreshEvent) -> Unit = { event ->
+      currentCameraDevicesRefreshDispatcher.dispatch(event)
+      if (event is CameraDevicesRefreshEvent.Failure) errorSubscription.dispatch(event.error)
     }
-    devicesState.addErrorListener(cameraErrorListener)?.also(cameraErrorListener)
+    devicesState.addRefreshListener(refreshListener)?.also(refreshListener)
     onDispose {
       errorSubscription.close()
-      devicesState.removeErrorListener(cameraErrorListener)
+      devicesState.removeRefreshListener(refreshListener)
     }
   }
 
@@ -400,6 +409,17 @@ internal class MainThreadErrorDispatcher(
     _handler.post {
       if (isActive()) onError(error)
     }
+  }
+}
+
+/** 始终按完成顺序把设备刷新事件排入主线程队列 */
+internal class MainThreadCameraDevicesRefreshDispatcher(
+  private val onEvent: (CameraDevicesRefreshEvent) -> Unit,
+) {
+  private val _handler = Handler(Looper.getMainLooper())
+
+  fun dispatch(event: CameraDevicesRefreshEvent) {
+    _handler.post { onEvent(event) }
   }
 }
 
