@@ -16,22 +16,26 @@ internal class PreviewSampledFrameDispatcher(
   private val onError: (Throwable) -> Unit,
   private val elapsedRealtimeMillis: () -> Long = SystemClock::elapsedRealtime,
   analysisCoordinator: CameraAnalysisCoordinator? = null,
+  private val beforeFrameCallback: (() -> Unit)? = null,
 ) : AutoCloseable {
   private val _lock = Any()
+  private val _closeLock = Any()
   private val _analysisCoordinator = analysisCoordinator ?: CameraAnalysisCoordinator()
   private val _ownsAnalysisCoordinator = analysisCoordinator == null
+  private val _callbackGate = FrameCallbackGate()
   // coordinator 只调度票据，主线程截图开始时才取得这里的最新请求。
   private val _pending = AtomicReference<PendingSampledFrame?>()
   private var _started = false
   private var _closed = false
   private var _lastSampleTimeMillis = 0L
   private var _runGeneration = 0L
+  private var _closeCompleted = false
 
   fun start() {
     synchronized(_lock) {
       if (_started || _closed) return
       _started = true
-      _runGeneration++
+      _runGeneration = _callbackGate.currentGeneration()
       _lastSampleTimeMillis = elapsedRealtimeMillis()
     }
   }
@@ -72,8 +76,10 @@ internal class PreviewSampledFrameDispatcher(
 
     var failure: Throwable? = null
     try {
-      // 取得当前 generation 的执行权后，此回调可以在停止过程中继续完成。
-      if (isCurrent(runGeneration)) onFrame(frame)
+      _callbackGate.runIfCurrent(runGeneration) {
+        beforeFrameCallback?.invoke()
+        onFrame(frame)
+      }
     } catch (error: Throwable) {
       failure = error
     } finally {
@@ -94,35 +100,41 @@ internal class PreviewSampledFrameDispatcher(
     }
   }
 
-  private fun isCurrent(runGeneration: Long): Boolean {
-    return synchronized(_lock) {
-      _started && !_closed && _runGeneration == runGeneration
-    }
-  }
-
   fun stop() {
     synchronized(_lock) {
       _started = false
       _pending.set(null)
-      _analysisCoordinator.discardPending(this)
+      _runGeneration = _callbackGate.advanceGeneration()
     }
+    _callbackGate.awaitIdle()
+    _analysisCoordinator.discardPending(this)
   }
 
-  override fun close() {
-    var shouldClose = false
+  fun requestClose() {
     synchronized(_lock) {
       if (!_closed) {
         _closed = true
         _started = false
         _pending.set(null)
-        shouldClose = true
+        _runGeneration = _callbackGate.closeAdmission()
       }
     }
-    if (!shouldClose) return
-    try {
-      _analysisCoordinator.discardPending(this)
-    } finally {
-      if (_ownsAnalysisCoordinator) _analysisCoordinator.close()
+  }
+
+  override fun close() {
+    requestClose()
+    synchronized(_closeLock) {
+      if (_closeCompleted) return
+      try {
+        _callbackGate.awaitIdle()
+        _analysisCoordinator.discardPending(this)
+      } finally {
+        try {
+          if (_ownsAnalysisCoordinator) _analysisCoordinator.close()
+        } finally {
+          _closeCompleted = true
+        }
+      }
     }
   }
 }

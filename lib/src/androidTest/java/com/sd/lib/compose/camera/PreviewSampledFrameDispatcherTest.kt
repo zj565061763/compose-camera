@@ -357,6 +357,7 @@ class PreviewSampledFrameDispatcherTest {
     val firstStarted = CountDownLatch(1)
     val releaseFirst = CountDownLatch(1)
     val firstFinished = CountDownLatch(1)
+    val closeFinished = CountDownLatch(1)
     val callbackCount = AtomicInteger()
     val capturedIdentities = mutableListOf<CameraFrameTransformIdentity>()
     val error = AtomicReference<Throwable?>()
@@ -389,12 +390,72 @@ class PreviewSampledFrameDispatcherTest {
     now.set(1_200)
     dispatcher.offer(pendingIdentity, isPreviewMirrored = false)
 
-    dispatcher.close()
+    val closeThread = Thread {
+      dispatcher.close()
+      closeFinished.countDown()
+    }.also(Thread::start)
+    assertThat(closeFinished.await(100, TimeUnit.MILLISECONDS)).isFalse()
     releaseFirst.countDown()
 
     assertThat(firstFinished.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(closeFinished.await(5, TimeUnit.SECONDS)).isTrue()
+    closeThread.join(5_000)
     assertThat(callbackCount.get()).isEqualTo(1)
     assertThat(capturedIdentities).containsExactly(firstIdentity)
+    assertThat(error.get()).isNull()
+  }
+
+  @Test
+  fun sampledFrameDispatcher_stopCannotPassAcquiredCallbackBeforeUserEntry() {
+    val now = AtomicLong(1_000)
+    val callbackAcquired = CountDownLatch(1)
+    val releaseCallback = CountDownLatch(1)
+    val callbackEntered = CountDownLatch(1)
+    val stopFinished = CountDownLatch(1)
+    val callbackOrder = AtomicInteger()
+    val stopOrder = AtomicInteger()
+    val order = AtomicInteger()
+    val error = AtomicReference<Throwable?>()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = Handler(Looper.getMainLooper()),
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        CameraFrame.PreviewSampled(
+          data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+          rotationDegrees = 0,
+          transformIdentity = identity,
+        )
+      },
+      onFrame = {
+        callbackOrder.set(order.incrementAndGet())
+        callbackEntered.countDown()
+      },
+      onError = error::set,
+      elapsedRealtimeMillis = now::get,
+      beforeFrameCallback = {
+        callbackAcquired.countDown()
+        check(releaseCallback.await(5, TimeUnit.SECONDS))
+      },
+    )
+    dispatcher.start()
+    now.set(1_100)
+    dispatcher.offer(CameraFrameTransformIdentity(), isPreviewMirrored = false)
+    assertThat(callbackAcquired.await(5, TimeUnit.SECONDS)).isTrue()
+    val stopThread = Thread {
+      dispatcher.stop()
+      stopOrder.set(order.incrementAndGet())
+      stopFinished.countDown()
+    }.also(Thread::start)
+
+    assertThat(stopFinished.await(100, TimeUnit.MILLISECONDS)).isFalse()
+    assertThat(callbackEntered.count).isEqualTo(1)
+    releaseCallback.countDown()
+
+    assertThat(callbackEntered.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(stopFinished.await(5, TimeUnit.SECONDS)).isTrue()
+    stopThread.join(5_000)
+    dispatcher.close()
+    assertThat(callbackOrder.get()).isLessThan(stopOrder.get())
     assertThat(error.get()).isNull()
   }
 

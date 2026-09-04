@@ -108,16 +108,16 @@ git diff --check
 - Surface 销毁时必须先在相机线程停止会话，再释放 `SurfaceTexture`。
 - 普通布局尺寸、`contentScale`、镜像模式和用户 lambda 变化只更新显示、坐标或回调引用，不得重复打开相机。
 - displayRotation、cameraId、帧处理模式和 retry generation 变化需要重建会话。
-- 只有 `frameProcessor` 不是 `FrameProcessor.None` 时才创建回调缓冲区；专用单线程 analysis executor 在首个分析任务到达时懒创建。
-- 单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用 `CameraPreview-Camera` 和 `CameraPreview-Analysis` 工作线程。Controller 在相机线程执行全部相机会话操作并只释放自己打开的相机；退出组合或 Lifecycle 销毁且所有 Controller 清理完成后，由 runtime 关闭工作线程，禁止影响进程内其他相机使用方。
+- 只有使用原始 `FrameProcessor.Preview` 时才创建回调缓冲区并要求 NV21；专用单线程 analysis executor 在首个分析任务到达时懒创建。
+- 单个正在组合的 `CameraPreview` 在连续 Controller generation 及 `LifecycleOwner` 交接期间复用 `CameraPreview-Camera` 和 `CameraPreview-Analysis` 工作线程。Controller 在相机线程执行全部相机会话操作并只释放自己打开的相机；退出组合或当前 Lifecycle 销毁且所有 Controller 清理完成后，由 runtime 关闭工作线程，禁止影响进程内其他相机使用方。
 - 库不协调并发相机会话，不支持不同 cameraId 同时预览。
 
 ## 预览与帧坐标转换
 
-- 参数设置后必须读取设备实际采用的 preview format 和 preview size；启用帧处理时格式必须是 NV21，实际尺寸用于发布 `previewResolution`，它表示原始帧缓冲区尺寸而不是 Compose 布局尺寸。
+- 参数设置后必须读取设备实际采用的 preview format 和 preview size；启用原始帧处理时格式必须是 NV21，实际尺寸用于发布 `previewResolution`，它表示原始帧缓冲区尺寸而不是 Compose 布局尺寸。
 - `TextureView` 必须按旋转后的缓冲区比例和 `ContentScale` 布局，禁止直接拉伸到 Compose 区域。
 - 前置摄像头的平台预览显示方向和原始帧旋转角度必须分别计算，禁止把镜像补偿后的显示方向用于帧数据或坐标变换。
-- 平台默认镜像前置预览；额外 `graphicsLayer` 镜像只用于达到 `CameraMirrorMode` 指定的目标状态。
+- 平台默认镜像前置预览；额外水平翻转合并到 `TextureView` 内容矩阵，只用于达到 `CameraMirrorMode` 指定的目标状态。
 - `CameraPreviewState` 以不可变快照和 `AtomicReference` 跨线程发布变换，分析线程无锁读取。
 - 变换链为 `raw frame -> display rotation -> ContentScale -> target mirror`。
 - 新会话、有效布局尺寸、`contentScale` 或目标镜像变化必须使旧 transform token 失效。
@@ -128,7 +128,7 @@ git diff --check
 - 帧处理回调在当前 `CameraPreview` 共享的 `CameraPreview-Analysis` 专用线程同步执行，只保留正在处理的帧和最新待处理帧或采样请求。
 - 相机打开、配置、预览、对焦、回调缓冲区归还和释放统一在 `CameraPreview-Camera` 专用线程执行。
 - 优先使用连续对焦模式；只支持 `FOCUS_MODE_AUTO` 时，在当前会话首个有效预览帧触发一次单次对焦，之后仅响应 `CameraPreviewState.requestFocus()`，并在会话停止时丢弃待处理请求。
-- 每个相机回调缓冲区都必须在 `finally` 中归还。释放会丢弃尚未开始的帧，但不能中断已经开始的回调。
+- 每个相机回调缓冲区都必须在 `finally` 中归还。停止或释放会先使尚未取得执行权的帧失效，并在相机线程等待已经取得执行权的同步回调完成，不能中断用户回调。
 - NV21 缓冲区必须在创建 `CameraFrame` 前验证正偶数宽高、整数溢出和最小数据长度。
 - `onError` 在主线程收到设备枚举、选择、打开、配置、运行、帧回调和普通清理异常。已开始帧的异常可能晚于组件离开组合。
 - 清理必须尝试全部普通步骤并汇总普通 `Exception`：停止回调、清除错误监听、停止预览、释放相机、清空会话状态和关闭 executor。

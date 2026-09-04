@@ -69,7 +69,7 @@ fun CameraPreview(
   val currentOnError by rememberUpdatedState(onError)
   val currentMirrorMode by rememberUpdatedState(mirrorMode)
   val errorDispatcher = remember { MainThreadErrorDispatcher { error -> currentOnError(error) } }
-  val runtime = remember(lifecycleOwner) { CameraPreviewRuntime() }
+  val runtimeStore = remember { CameraPreviewRuntimeStore() }
   var isLifecycleDestroyed by remember(lifecycleOwner) {
     mutableStateOf(lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED)
   }
@@ -101,21 +101,24 @@ fun CameraPreview(
     onDispose { state.reset() }
   }
 
-  DisposableEffect(runtime, lifecycleOwner) {
+  DisposableEffect(runtimeStore) {
+    onDispose { runtimeStore.close() }
+  }
+
+  DisposableEffect(runtimeStore, lifecycleOwner) {
     val observer = LifecycleEventObserver { _, event ->
       if (event == Lifecycle.Event.ON_DESTROY) {
         isLifecycleDestroyed = true
-        runtime.close()
+        runtimeStore.closeCurrentRuntime()
       }
     }
     lifecycleOwner.lifecycle.addObserver(observer)
     if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
       isLifecycleDestroyed = true
-      runtime.close()
+      runtimeStore.closeCurrentRuntime()
     }
     onDispose {
       lifecycleOwner.lifecycle.removeObserver(observer)
-      runtime.close()
     }
   }
 
@@ -186,8 +189,9 @@ fun CameraPreview(
       onDispose { }
     } else {
       val failureSubscription = MainThreadErrorSubscription(failureDispatcher)
+      val runtimeLease = runtimeStore.acquire()
       val controller = CameraPreviewController(
-        runtime = runtime,
+        runtimeLease = runtimeLease,
         lifecycleOwner = lifecycleOwner,
         textureView = currentTextureView,
         cameraId = cameraId,

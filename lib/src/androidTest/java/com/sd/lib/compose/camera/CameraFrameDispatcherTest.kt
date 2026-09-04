@@ -62,6 +62,7 @@ class CameraFrameDispatcherTest {
     val firstStarted = CountDownLatch(1)
     val releaseFirst = CountDownLatch(1)
     val firstFinished = CountDownLatch(1)
+    val closeFinished = CountDownLatch(1)
     val buffersReturned = CountDownLatch(2)
     val callbackCount = AtomicInteger()
     val returned = mutableListOf<Int>()
@@ -80,13 +81,61 @@ class CameraFrameDispatcherTest {
     assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
     dispatcher.offerFrame(2, returned, buffersReturned)
 
-    dispatcher.close()
+    val closeThread = Thread {
+      dispatcher.close()
+      closeFinished.countDown()
+    }.also(Thread::start)
+    assertThat(closeFinished.await(100, TimeUnit.MILLISECONDS)).isFalse()
     releaseFirst.countDown()
 
     assertThat(firstFinished.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(closeFinished.await(5, TimeUnit.SECONDS)).isTrue()
     assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
+    closeThread.join(5_000)
     assertThat(callbackCount.get()).isEqualTo(1)
     assertThat(returned).containsExactly(1, 2)
+    assertThat(error.get()).isNull()
+  }
+
+  @Test
+  fun frameDispatcher_closeCannotPassAcquiredCallbackBeforeUserEntry() {
+    val callbackAcquired = CountDownLatch(1)
+    val releaseCallback = CountDownLatch(1)
+    val callbackEntered = CountDownLatch(1)
+    val closeFinished = CountDownLatch(1)
+    val bufferReturned = CountDownLatch(1)
+    val error = AtomicReference<Throwable?>()
+    val dispatcher = CameraFrameDispatcher(
+      onFrame = { callbackEntered.countDown() },
+      onError = error::set,
+      beforeFrameCallback = {
+        callbackAcquired.countDown()
+        check(releaseCallback.await(5, TimeUnit.SECONDS))
+      },
+    )
+
+    dispatcher.offer(
+      data = ByteArray(6),
+      width = 2,
+      height = 2,
+      rotationDegrees = 0,
+      transformIdentity = CameraFrameTransformIdentity(),
+      returnBuffer = { bufferReturned.countDown() },
+    )
+    assertThat(callbackAcquired.await(5, TimeUnit.SECONDS)).isTrue()
+    val closeThread = Thread {
+      dispatcher.close()
+      closeFinished.countDown()
+    }.also(Thread::start)
+
+    assertThat(closeFinished.await(100, TimeUnit.MILLISECONDS)).isFalse()
+    assertThat(callbackEntered.count).isEqualTo(1)
+    releaseCallback.countDown()
+
+    assertThat(callbackEntered.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(closeFinished.await(5, TimeUnit.SECONDS)).isTrue()
+    assertThat(bufferReturned.await(5, TimeUnit.SECONDS)).isTrue()
+    closeThread.join(5_000)
     assertThat(error.get()).isNull()
   }
 
@@ -197,6 +246,7 @@ class CameraFrameDispatcherTest {
     val coordinator = CameraAnalysisCoordinator { executor }
     val firstStarted = CountDownLatch(1)
     val releaseFirst = CountDownLatch(1)
+    val firstClosed = CountDownLatch(1)
     val secondStarted = CountDownLatch(1)
     val callbacks = CountDownLatch(2)
     val buffersReturned = CountDownLatch(3)
@@ -232,14 +282,19 @@ class CameraFrameDispatcherTest {
     try {
       firstDispatcher.offerFrame(1, returned, buffersReturned)
       assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
-      firstDispatcher.close()
+      val closeThread = Thread {
+        firstDispatcher.close()
+        firstClosed.countDown()
+      }.also(Thread::start)
       secondDispatcher.offerFrame(2, returned, buffersReturned)
       secondDispatcher.offerFrame(3, returned, buffersReturned)
-      firstDispatcher.discardPending()
 
+      assertThat(firstClosed.await(100, TimeUnit.MILLISECONDS)).isFalse()
       assertThat(secondStarted.await(200, TimeUnit.MILLISECONDS)).isFalse()
       releaseFirst.countDown()
 
+      assertThat(firstClosed.await(5, TimeUnit.SECONDS)).isTrue()
+      firstDispatcher.discardPending()
       assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(seen).containsExactly(1, 3).inOrder()
@@ -247,6 +302,7 @@ class CameraFrameDispatcherTest {
       assertThat(returned).containsExactly(1, 2, 3)
       assertThat(executor.isShutdown).isFalse()
       assertThat(error.get()).isNull()
+      closeThread.join(5_000)
       coordinator.close()
       assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
     } finally {
@@ -264,6 +320,7 @@ class CameraFrameDispatcherTest {
     val now = AtomicLong(1_000)
     val rawStarted = CountDownLatch(1)
     val releaseRaw = CountDownLatch(1)
+    val rawClosed = CountDownLatch(1)
     val rawBufferReturned = CountDownLatch(1)
     val sampledStarted = CountDownLatch(1)
     val sampledThread = AtomicReference<String?>()
@@ -302,7 +359,10 @@ class CameraFrameDispatcherTest {
     try {
       rawDispatcher.offerFrame(1, returned, rawBufferReturned)
       assertThat(rawStarted.await(5, TimeUnit.SECONDS)).isTrue()
-      rawDispatcher.close()
+      val closeThread = Thread {
+        rawDispatcher.close()
+        rawClosed.countDown()
+      }.also(Thread::start)
       sampledDispatcher.start()
       val replacedIdentity = CameraFrameTransformIdentity()
       val latestIdentity = CameraFrameTransformIdentity()
@@ -311,16 +371,19 @@ class CameraFrameDispatcherTest {
       now.set(1_200)
       sampledDispatcher.offer(latestIdentity, isPreviewMirrored = false)
 
+      assertThat(rawClosed.await(100, TimeUnit.MILLISECONDS)).isFalse()
       assertThat(sampledStarted.await(200, TimeUnit.MILLISECONDS)).isFalse()
       assertThat(synchronized(capturedIdentities) { capturedIdentities.toList() }).isEmpty()
       releaseRaw.countDown()
 
+      assertThat(rawClosed.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(sampledStarted.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(rawBufferReturned.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(capturedIdentities).containsExactly(latestIdentity)
       assertThat(sampledThread.get()).isEqualTo("SharedAnalysis")
       assertThat(executor.isShutdown).isFalse()
       assertThat(error.get()).isNull()
+      closeThread.join(5_000)
       coordinator.close()
       assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
     } finally {

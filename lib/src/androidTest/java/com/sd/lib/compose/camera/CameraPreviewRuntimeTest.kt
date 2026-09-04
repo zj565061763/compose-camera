@@ -14,6 +14,40 @@ import java.util.concurrent.atomic.AtomicReference
 @RunWith(AndroidJUnit4::class)
 class CameraPreviewRuntimeTest {
   @Test
+  fun cameraPreviewRuntimeStore_reusesRuntimeUntilCurrentRuntimeCloses() {
+    val store = CameraPreviewRuntimeStore()
+    val first = store.acquire()
+    val second = store.acquire()
+
+    assertThat(second.cameraHandler.looper).isSameInstanceAs(first.cameraHandler.looper)
+
+    first.close()
+    second.close()
+    store.closeCurrentRuntime()
+    val replacement = store.acquire()
+
+    assertThat(replacement.cameraHandler.looper).isNotSameInstanceAs(first.cameraHandler.looper)
+    replacement.close()
+    store.close()
+    assertThrows(IllegalStateException::class.java) { store.acquire() }
+  }
+
+  @Test
+  fun cameraPreviewRuntimeStore_reopensRuntimeWhilePreviousControllerIsClosing() {
+    val store = CameraPreviewRuntimeStore()
+    val oldLease = store.acquire()
+
+    store.closeCurrentRuntime()
+    val newLease = store.acquire()
+
+    assertThat(newLease.cameraHandler.looper).isSameInstanceAs(oldLease.cameraHandler.looper)
+    oldLease.close()
+    assertThat(newLease.cameraHandler.post {}).isTrue()
+    newLease.close()
+    store.close()
+  }
+
+  @Test
   fun cameraPreviewRuntime_reusesCameraThreadUntilLastLeaseCloses() {
     val runtime = CameraPreviewRuntime()
     val firstLease = runtime.acquire()

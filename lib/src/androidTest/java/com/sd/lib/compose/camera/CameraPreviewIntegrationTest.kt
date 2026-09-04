@@ -576,26 +576,26 @@ class CameraPreviewIntegrationTest {
       )
     }
 
+    lateinit var initialSessionIdentity: CameraFrameTransformIdentity
     try {
       assertThat(firstCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
-      lateinit var initialSessionIdentity: CameraFrameTransformIdentity
       _composeRule.runOnIdle {
         initialSessionIdentity = checkNotNull(state.currentSessionIdentity())
         state.retry()
       }
-      _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
-        val currentSessionIdentity = state.currentSessionIdentity()
-        error.get() != null || (
-          currentSessionIdentity != null &&
-            currentSessionIdentity !== initialSessionIdentity &&
-            state.isPreviewFrameAvailable()
-        )
-      }
-
       assertThat(error.get()).isNull()
       assertThat(nextCallbackStarted.await(300, TimeUnit.MILLISECONDS)).isFalse()
     } finally {
       releaseFirstCallback.countDown()
+    }
+
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      val currentSessionIdentity = state.currentSessionIdentity()
+      error.get() != null || (
+        currentSessionIdentity != null &&
+          currentSessionIdentity !== initialSessionIdentity &&
+          state.isPreviewFrameAvailable()
+      )
     }
 
     assertThat(nextCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
@@ -962,11 +962,18 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
-  fun lifecycleOwnerChange_reopensSessionWithoutCameraOpenFailure() {
+  fun destroyedLifecycleOwnerHandoff_reusesWorkersWithoutCameraOpenFailure() {
     assumeCameraAvailable()
     val initialCameraThreads = activeCameraThreads()
     val initialLifecycleOwner = FakeLifecycleOwner()
     val lifecycleOwner = mutableStateOf(initialLifecycleOwner)
+    val firstCallbackStarted = CountDownLatch(1)
+    val releaseFirstCallback = CountDownLatch(1)
+    val nextCallbackStarted = CountDownLatch(1)
+    val callbackCount = AtomicInteger()
+    val activeCallbacks = AtomicInteger()
+    val overlappingCallbacks = AtomicBoolean()
+    val callbackThreads = CopyOnWriteArrayList<Thread>()
     val state = CameraPreviewState()
     val error = AtomicReference<Throwable?>()
     _composeRule.runOnUiThread { initialLifecycleOwner.start() }
@@ -977,13 +984,51 @@ class CameraPreviewIntegrationTest {
           modifier = Modifier.size(240.dp),
           state = state,
           onError = { failure -> error.compareAndSet(null, failure) },
+          frameProcessor = FrameProcessor.Preview {
+            callbackThreads += Thread.currentThread()
+            if (activeCallbacks.incrementAndGet() > 1) overlappingCallbacks.set(true)
+            try {
+              if (callbackCount.incrementAndGet() == 1) {
+                firstCallbackStarted.countDown()
+                check(releaseFirstCallback.await(FRAME_TIMEOUT_SECONDS * 2, TimeUnit.SECONDS))
+              } else {
+                nextCallbackStarted.countDown()
+              }
+            } finally {
+              activeCallbacks.decrementAndGet()
+            }
+          },
         )
       }
     }
     waitForPreview(state, error)
+    assertThat(firstCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
     var previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
 
-    repeat(5) {
+    val handoffLifecycleOwner = FakeLifecycleOwner()
+    try {
+      _composeRule.runOnUiThread {
+        handoffLifecycleOwner.start()
+        initialLifecycleOwner.destroy()
+        lifecycleOwner.value = handoffLifecycleOwner
+      }
+      assertThat(nextCallbackStarted.await(300, TimeUnit.MILLISECONDS)).isFalse()
+      assertThat(error.get()).isNull()
+    } finally {
+      releaseFirstCallback.countDown()
+    }
+    _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+      val currentSessionIdentity = state.currentSessionIdentity()
+      error.get() != null || (
+        currentSessionIdentity != null &&
+          currentSessionIdentity !== previousSessionIdentity &&
+          state.createCurrentTextureViewTransform(currentSessionIdentity) != null
+      )
+    }
+    assertThat(nextCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
+
+    repeat(4) {
       val nextLifecycleOwner = FakeLifecycleOwner()
       _composeRule.runOnUiThread {
         nextLifecycleOwner.start()
@@ -1002,6 +1047,8 @@ class CameraPreviewIntegrationTest {
 
     assertThat(error.get()).isNull()
     assertThat(state.previewResolution.value).isNotEqualTo(IntSize.Zero)
+    assertThat(overlappingCallbacks.get()).isFalse()
+    assertThat(callbackThreads.distinct()).hasSize(1)
     _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
       (activeCameraThreads() - initialCameraThreads).size == 1
     }
@@ -1025,7 +1072,7 @@ class CameraPreviewIntegrationTest {
       val textureView = TextureView(_composeRule.activity)
       runtime = CameraPreviewRuntime()
       controller = CameraPreviewController(
-        runtime = runtime,
+        runtimeLease = runtime.acquire(),
         lifecycleOwner = lifecycleOwner,
         textureView = textureView,
         cameraId = null,
@@ -1071,7 +1118,7 @@ class CameraPreviewIntegrationTest {
       textureView = TextureView(_composeRule.activity)
       val runtime = CameraPreviewRuntime()
       val controller = CameraPreviewController(
-        runtime = runtime,
+        runtimeLease = runtime.acquire(),
         lifecycleOwner = lifecycleOwner,
         textureView = textureView,
         cameraId = null,

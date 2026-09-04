@@ -8,12 +8,15 @@ internal class CameraFrameDispatcher(
   private val onError: (Throwable) -> Unit,
   analysisCoordinator: CameraAnalysisCoordinator? = null,
   private val beforeFrameStart: (() -> Unit)? = null,
+  private val beforeFrameCallback: (() -> Unit)? = null,
 ) : AutoCloseable {
-  private val _lock = Any()
+  private val _offerLock = Any()
+  private val _closeLock = Any()
   private val _analysisCoordinator = analysisCoordinator ?: CameraAnalysisCoordinator()
   private val _ownsAnalysisCoordinator = analysisCoordinator == null
-  private var _dispatchGeneration = 0L
-  private var _closed = false
+  private val _callbackGate = FrameCallbackGate()
+  private var _acceptingFrames = true
+  private var _closeCompleted = false
 
   fun offer(
     data: ByteArray,
@@ -28,8 +31,8 @@ internal class CameraFrameDispatcher(
       return
     }
     var shouldDiscard = false
-    synchronized(_lock) {
-      if (_closed) {
+    synchronized(_offerLock) {
+      if (!_acceptingFrames) {
         shouldDiscard = true
       } else {
         val frame = PendingCameraFrame(
@@ -38,7 +41,7 @@ internal class CameraFrameDispatcher(
           height = height,
           rotationDegrees = rotationDegrees,
           transformIdentity = transformIdentity,
-          dispatchGeneration = _dispatchGeneration,
+          dispatchGeneration = _callbackGate.currentGeneration(),
           returnBuffer = returnBuffer,
         )
         _analysisCoordinator.offer(
@@ -62,8 +65,8 @@ internal class CameraFrameDispatcher(
         rotationDegrees = frame.rotationDegrees,
         transformIdentity = frame.transformIdentity,
       )
-      // 取得当前 generation 的执行权后，此回调可以在停止过程中继续完成。
-      if (synchronized(_lock) { !_closed && frame.dispatchGeneration == _dispatchGeneration }) {
+      _callbackGate.runIfCurrent(frame.dispatchGeneration) {
+        beforeFrameCallback?.invoke()
         onFrame(callbackFrame)
       }
     } catch (error: Throwable) {
@@ -77,26 +80,39 @@ internal class CameraFrameDispatcher(
   }
 
   fun discardPending() {
-    synchronized(_lock) {
-      _dispatchGeneration++
-      _analysisCoordinator.discardPending(this)
+    try {
+      synchronized(_offerLock) {
+        _callbackGate.advanceGeneration()
+        _analysisCoordinator.discardPending(this)
+      }
+    } finally {
+      _callbackGate.awaitIdle()
+    }
+  }
+
+  fun requestClose() {
+    synchronized(_offerLock) {
+      if (_acceptingFrames) {
+        _acceptingFrames = false
+        _callbackGate.closeAdmission()
+      }
     }
   }
 
   override fun close() {
-    var shouldClose = false
-    synchronized(_lock) {
-      if (!_closed) {
-        _closed = true
-        _dispatchGeneration++
-        shouldClose = true
+    requestClose()
+    synchronized(_closeLock) {
+      if (_closeCompleted) return
+      try {
+        _callbackGate.awaitIdle()
+        _analysisCoordinator.discardPending(this)
+      } finally {
+        try {
+          if (_ownsAnalysisCoordinator) _analysisCoordinator.close()
+        } finally {
+          _closeCompleted = true
+        }
       }
-    }
-    if (!shouldClose) return
-    try {
-      _analysisCoordinator.discardPending(this)
-    } finally {
-      if (_ownsAnalysisCoordinator) _analysisCoordinator.close()
     }
   }
 

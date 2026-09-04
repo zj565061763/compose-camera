@@ -51,8 +51,8 @@
 - `CameraPreviewState.takeScreenshot()` 的截图入口只在对应 `CameraPreview` 组合期间有效，退出组合后必须解除，不能继续访问已经释放的 TextureView。
 - `CameraPreviewState.requestFocus()` 的对焦入口只在对应 Controller 组合期间有效，Controller 替换或退出组合后必须按入口身份解除，旧 Controller 不得清除或接收新会话的请求。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
-- 单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用同一个 `CameraPreview-Camera` 专用线程，旧 generation 的停止与新 generation 的启动按提交顺序执行。
-- Controller 在相机线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作，只释放自己打开的相机；Runtime 由 `CameraPreview` 外层直接监听 Lifecycle 销毁，确保没有活动 Controller 时也能关闭。`CameraPreview` 退出组合或 Lifecycle 销毁且所有 Controller 清理完成后，runtime 才关闭自己创建的工作线程，不得影响进程内其他相机使用方。
+- 单个正在组合的 `CameraPreview` 在连续 Controller generation 及 `LifecycleOwner` 交接期间复用同一个 `CameraPreview-Camera` 专用线程，旧 generation 的停止与新 generation 的启动按提交顺序执行。
+- Controller 在相机线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作，只释放自己打开的相机；Runtime store 由 `CameraPreview` 外层直接监听当前 Lifecycle 销毁，确保没有活动 Controller 时也能关闭，并在后续交接到新 Lifecycle 时按需创建新 Runtime。`CameraPreview` 退出组合或当前 Lifecycle 销毁且所有 Controller 清理完成后，runtime 才关闭自己创建的工作线程，不得影响进程内其他相机使用方。
 - 打开、配置或运行错误会停止当前会话；外部条件恢复后可以调用 `CameraPreviewState.retry()`。
 
 ## 预览尺寸、旋转与镜像
@@ -75,7 +75,7 @@
 
 - 只有使用原始 `Preview` 帧处理时才创建三个 NV21 回调缓冲区；名为 `CameraPreview-Analysis` 的单线程 executor 在首个分析任务到达时懒创建，并由单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用。
 - 原始帧和采样帧共享分析串行协调器；旧回调完成前，新 generation 只能合并保留最新待处理任务，禁止并发进入用户回调。
-- 回调任务在 generation 有效性检查处取得执行权；会话停止或 dispatcher 关闭会使尚未取得执行权的任务失效，但不等待已经取得执行权的同步回调。
+- generation 有效性检查和进入用户回调必须由同一个回调门控保护。会话停止或 dispatcher 关闭先使尚未取得执行权的任务失效，再在相机线程等待已经取得执行权的同步回调完成；主线程只提交异步清理，不得直接等待用户回调。
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用当前会话的 `onSurfaceTextureUpdated` 作为采样节拍，不注册相机帧回调；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
 - `PreviewSampled` 请求在主线程真正开始截图前始终可以被更新请求替换；分析协调器提前取出调度任务不能固化待截图请求。
@@ -88,7 +88,7 @@
 - NV21 帧宽高必须为正偶数，所需字节数必须能安全表示为 `Int`，实际数据长度不得小于 `width × height × 3 / 2`。不符合条件的回调缓冲区直接归还，不创建 `CameraFrame`。
 - 每个相机回调缓冲区都必须在处理完成、被替换、被丢弃或 dispatcher 关闭时归还。
 - 帧回调异常和缓冲区归还异常必须保留正确的主异常及 suppressed 异常；致命 `Error` 不得作为业务异常吞掉。
-- 释放会丢弃尚未开始的帧，但不能中断已经开始的同步回调。
+- 释放会丢弃尚未取得执行权的帧，并等待已经取得执行权的同步回调完成，不能中断用户回调。
 
 ## 错误与清理
 
@@ -105,8 +105,8 @@
 
 - `CameraPreviewStateTest.kt` 覆盖缩放矩阵、镜像、token 失效、会话状态和错误发布。
 - `CameraPreviewBitmapTest.kt` 与 `CameraPreviewParametersTest.kt` 覆盖截图像素与所有权、Bitmap 转换、尺寸选择和前后摄像头旋转。
-- `CameraPreviewAutoFocusTest.kt`、`CameraPreviewCleanupTest.kt` 与 `CameraPreviewRuntimeTest.kt` 覆盖首帧和 session 对焦协调、单次对焦调度、异常安全清理及工作线程复用。
-- `CameraFrameDispatcherTest.kt` 与 `PreviewSampledFrameDispatcherTest.kt` 覆盖 NV21 校验、原始帧与采样帧分发、缓冲区所有权、错误聚合和线程 interrupt 隔离。
+- `CameraPreviewAutoFocusTest.kt`、`CameraPreviewCleanupTest.kt` 与 `CameraPreviewRuntimeTest.kt` 覆盖首帧和 session 对焦协调、单次对焦调度、异常安全清理、Runtime store 及工作线程复用。
+- `CameraFrameDispatcherTest.kt` 与 `PreviewSampledFrameDispatcherTest.kt` 覆盖 NV21 校验、原始帧与采样帧分发、回调进入门控、缓冲区所有权、错误聚合和线程 interrupt 隔离。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、LifecycleOwner 交接、无活动 Controller 时的 Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。

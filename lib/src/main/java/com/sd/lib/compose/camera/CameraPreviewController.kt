@@ -17,7 +17,7 @@ import androidx.lifecycle.LifecycleOwner
 
 /** 管理一次 [CameraPreview] 会话和帧分发 */
 internal class CameraPreviewController(
-  runtime: CameraPreviewRuntime,
+  runtimeLease: CameraPreviewRuntimeLease,
   private val lifecycleOwner: LifecycleOwner,
   private val textureView: TextureView,
   private val cameraId: String?,
@@ -42,7 +42,7 @@ internal class CameraPreviewController(
   private val autoFocusOperationsFactory: CameraAutoFocusOperationsFactory = PlatformCameraAutoFocusOperationsFactory,
 ) : AutoCloseable {
   private val _mainHandler = Handler(Looper.getMainLooper())
-  private val _runtimeLease = runtime.acquire()
+  private val _runtimeLease = runtimeLease
   private val _cameraHandler = _runtimeLease.cameraHandler
   private val _analysisCoordinator = _runtimeLease.analysisCoordinator
   private val _previewFrameDispatcher = (frameProcessor as? ActiveFrameProcessor.Preview)?.let { processor ->
@@ -446,47 +446,57 @@ internal class CameraPreviewController(
     }
   }
 
-  @MainThread
-  override fun close() {
-    if (_closed) return
-    _closed = true
-    if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
-      _runtimeLease.closeRuntime()
-    }
-    _shouldRun = false
-    _requestGeneration++
-    lifecycleOwner.lifecycle.removeObserver(_lifecycleObserver)
-    runCameraCleanupActions(
+  private fun closeFrameDispatchers(finalAction: () -> Unit): Exception? {
+    return runCameraCleanupActions(
       actions = buildList {
         _previewFrameDispatcher?.also { dispatcher -> add(dispatcher::close) }
         _sampledFrameDispatcher?.also { dispatcher -> add(dispatcher::close) }
       },
-      finalAction = {
-        val closeTask = Runnable {
-          try {
-            stopCamera()
-          } finally {
-            try {
-              callOnMainThread {
-                if (textureView.surfaceTextureListener === _surfaceTextureListener) {
-                  textureView.surfaceTextureListener = null
-                }
-                _surfaceTexture = null
-              }
-            } finally {
-              _runtimeLease.close()
-            }
-          }
+      finalAction = finalAction,
+    )
+  }
+
+  @MainThread
+  private fun detachSurfaceTextureListener() {
+    if (textureView.surfaceTextureListener === _surfaceTextureListener) {
+      textureView.surfaceTextureListener = null
+    }
+    _surfaceTexture = null
+  }
+
+  @MainThread
+  override fun close() {
+    if (_closed) return
+    _closed = true
+    _shouldRun = false
+    _requestGeneration++
+    lifecycleOwner.lifecycle.removeObserver(_lifecycleObserver)
+    _previewFrameDispatcher?.requestClose()
+    _sampledFrameDispatcher?.requestClose()
+    val closeTask = Runnable {
+      try {
+        closeFrameDispatchers(::stopCamera)?.also(onError)
+      } finally {
+        try {
+          callOnMainThread(::detachSurfaceTextureListener)
+        } finally {
+          _runtimeLease.close()
         }
-        if (!_cameraHandler.post(closeTask)) {
-          try {
-            onError(IllegalStateException("The camera operation thread is not available."))
-          } finally {
-            _runtimeLease.close()
-          }
+      }
+    }
+    if (!_cameraHandler.post(closeTask)) {
+      try {
+        closeFrameDispatchers {
+          throw IllegalStateException("The camera operation thread is not available.")
+        }?.also(onError)
+      } finally {
+        try {
+          detachSurfaceTextureListener()
+        } finally {
+          _runtimeLease.close()
         }
-      },
-    )?.also(onError)
+      }
+    }
   }
 }
 
