@@ -699,6 +699,45 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun zeroSizeLayout_doesNotPublishCurrentFrameTransform() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(200, 100), ContentScale.Fit, isMirrored = false)
+    state.startSession(identity, IntSize(200, 100), rotationDegrees = 0, isMirrored = false)
+    state.markPreviewFrameAvailable(identity)
+    val previousFrame = frame(identity, 200, 100, 0)
+
+    state.updatePreviewLayout(IntSize.Zero, ContentScale.Fit, isMirrored = false)
+    val hiddenFrame = frame(state.currentTransformIdentity(), 200, 100, 0)
+
+    assertThat(state.currentTransformIdentity()).isNull()
+    assertThat(state.isFrameTransformCurrent(previousFrame.transformToken)).isFalse()
+    assertThat(state.isFrameTransformCurrent(hiddenFrame.transformToken)).isFalse()
+    assertThat(state.createTransformToPreview(hiddenFrame)).isNull()
+  }
+
+  @Test
+  fun firstFrameAtZeroSize_waitsForValidGeometryBeforePublishingTransform() {
+    val state = CameraPreviewState()
+    val sessionIdentity = CameraFrameTransformIdentity()
+    state.startSession(sessionIdentity, IntSize(200, 100), rotationDegrees = 0, isMirrored = false)
+
+    state.markPreviewFrameAvailable(sessionIdentity)
+    val hiddenFrame = frame(state.currentTransformIdentity(), 200, 100, 0)
+
+    assertThat(state.currentTransformIdentity()).isNull()
+    assertThat(state.isFrameTransformCurrent(hiddenFrame.transformToken)).isFalse()
+    assertThat(state.createTransformToPreview(hiddenFrame)).isNull()
+
+    state.updatePreviewLayout(IntSize(200, 100), ContentScale.Fit, isMirrored = false)
+    val visibleIdentity = checkNotNull(state.currentTransformIdentity())
+    val visibleFrame = frame(visibleIdentity, 200, 100, 0)
+
+    assertThat(state.isFrameTransformCurrent(visibleFrame.transformToken)).isTrue()
+    assertThat(state.createTransformToPreview(visibleFrame)).isNotNull()
+  }
+
+  @Test
   fun contentScaleChange_invalidatesOldFrameTokenWhenGeometryIsUnchanged() {
     val state = CameraPreviewState()
     val identity = CameraFrameTransformIdentity()
@@ -2202,7 +2241,7 @@ private fun awaitThreadInterruptCleared(thread: Thread, timeoutMillis: Long): Bo
 }
 
 private fun frame(
-  identity: CameraFrameTransformIdentity,
+  identity: CameraFrameTransformIdentity?,
   width: Int,
   height: Int,
   rotationDegrees: Int,

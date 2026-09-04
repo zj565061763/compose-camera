@@ -86,7 +86,7 @@ class CameraPreviewState internal constructor() {
   @AnyThread
   fun isFrameTransformCurrent(token: CameraFrameTransformToken): Boolean {
     val config = _transformConfig.get()
-    return config.isPreviewFrameAvailable && token.matches(config.transformIdentity)
+    return config.isPreviewFrameAvailable && config.geometry != null && token.matches(config.transformIdentity)
   }
 
   @AnyThread
@@ -322,6 +322,7 @@ class CameraPreviewState internal constructor() {
         geometry = geometry,
         isMirrored = isMirrored,
         transformIdentity = when {
+          geometry == null -> null
           !current.isPreviewFrameAvailable -> null
           transformChanged && current.sessionIdentity != null -> CameraFrameTransformIdentity()
           else -> current.transformIdentity
@@ -484,7 +485,7 @@ class CameraPreviewState internal constructor() {
     if (current.sessionIdentity !== sessionIdentity || current.isPreviewFrameAvailable) return null
     _transformConfig.set(
       current.copy(
-        transformIdentity = sessionIdentity,
+        transformIdentity = if (current.geometry == null) null else sessionIdentity,
         isPreviewFrameAvailable = true,
       ),
     )

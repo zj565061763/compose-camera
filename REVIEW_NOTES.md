@@ -1,6 +1,6 @@
 # Camera Library Review Notes
 
-本文记录截至 2026-08-30 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
+本文记录截至 2026-09-04 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
 
 ## 产品边界
 
@@ -67,6 +67,7 @@
 - `CameraPreviewState` 以不可变快照和 `AtomicReference` 跨线程发布变换，分析线程无锁读取。
 - 变换链为 `raw frame -> display rotation -> ContentScale -> target mirror`。
 - 新相机会话、有效布局尺寸、`contentScale` 或目标镜像变化必须使旧 transform token 失效。
+- 布局为零或无法生成 geometry 时不得发布 transform identity，`isFrameTransformCurrent()` 必须返回 `false`。
 - 异步分析结果写回 UI 前必须使用 `CameraPreviewState.isFrameTransformCurrent()` 校验 token。
 - `createTransformToPreview()` 对 `Preview` 输入原始缓冲区坐标；若检测器输出已经按 `rotationDegrees` 旋转，调用方需先转回原始缓冲区坐标。对 `PreviewSampled` 输入 Bitmap 坐标，只补充目标镜像。
 
@@ -105,6 +106,7 @@
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
+- 仪器测试 APK 的 targetSdk 与 compileSdk 保持一致，避免只覆盖旧版兼容行为。
 - 异步测试使用有超时的等待，禁止固定 `sleep`；优先使用轻量 Fake、Google Truth 和显式 `AndroidJUnit4`。
 - 真实相机测试按设备能力跳过没有相机的场景。
 
