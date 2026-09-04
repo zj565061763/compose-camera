@@ -1819,6 +1819,7 @@ class CameraPreviewStateTest {
       assertThat(awaitThreadState(worker, Thread.State.WAITING, 5_000)).isTrue()
 
       worker.interrupt()
+      assertThat(awaitThreadInterruptCleared(worker, 5_000)).isTrue()
       releaseInterruptedCapture.countDown()
 
       assertThat(errorReceived.await(5, TimeUnit.SECONDS)).isTrue()
@@ -2132,6 +2133,15 @@ private fun awaitThreadState(thread: Thread, state: Thread.State, timeoutMillis:
     Thread.yield()
   }
   return thread.state == state
+}
+
+private fun awaitThreadInterruptCleared(thread: Thread, timeoutMillis: Long): Boolean {
+  val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+  while (System.nanoTime() < deadline) {
+    if (!thread.isInterrupted) return true
+    Thread.yield()
+  }
+  return !thread.isInterrupted
 }
 
 private fun frame(
