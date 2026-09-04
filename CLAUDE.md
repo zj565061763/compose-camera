@@ -1,1 +1,1 @@
-请读取 AGENTS.md
+@AGENTS.md
