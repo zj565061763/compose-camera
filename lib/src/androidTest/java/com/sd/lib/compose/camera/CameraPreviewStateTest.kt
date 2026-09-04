@@ -1505,6 +1505,63 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun frameDispatcher_callbackInterruptDoesNotAffectBufferReturn() {
+    val cameraThread = HandlerThread("CameraPreview-BufferReturnTest").also { it.start() }
+    val cameraHandler = Handler(cameraThread.looper)
+    val cameraBlocked = CountDownLatch(1)
+    val releaseCamera = CountDownLatch(1)
+    val returnStarted = CountDownLatch(1)
+    val bufferReturned = CountDownLatch(1)
+    val analysisDrained = CountDownLatch(1)
+    val error = AtomicReference<Throwable?>()
+    val executor = Executors.newSingleThreadExecutor { runnable ->
+      Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME)
+    }
+    var dispatcher: CameraFrameDispatcher? = null
+
+    try {
+      check(
+        cameraHandler.post {
+          cameraBlocked.countDown()
+          check(releaseCamera.await(15, TimeUnit.SECONDS))
+        },
+      )
+      assertThat(cameraBlocked.await(5, TimeUnit.SECONDS)).isTrue()
+      val currentDispatcher = CameraFrameDispatcher(
+        onFrame = { Thread.currentThread().interrupt() },
+        onError = error::set,
+        executor = executor,
+      ).also { dispatcher = it }
+
+      currentDispatcher.offer(
+        data = ByteArray(6),
+        width = 2,
+        height = 2,
+        rotationDegrees = 0,
+        transformIdentity = CameraFrameTransformIdentity(),
+        returnBuffer = {
+          returnStarted.countDown()
+          check(cameraHandler.post { bufferReturned.countDown() })
+          check(bufferReturned.await(5, TimeUnit.SECONDS))
+        },
+      )
+
+      assertThat(returnStarted.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(bufferReturned.await(200, TimeUnit.MILLISECONDS)).isFalse()
+      releaseCamera.countDown()
+      assertThat(bufferReturned.await(5, TimeUnit.SECONDS)).isTrue()
+      executor.execute { analysisDrained.countDown() }
+      assertThat(analysisDrained.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(error.get()).isNull()
+    } finally {
+      releaseCamera.countDown()
+      dispatcher?.close() ?: executor.shutdown()
+      cameraThread.quitSafely()
+      cameraThread.join(5_000)
+    }
+  }
+
+  @Test
   fun frameDispatcher_executorRejectionReturnsFrameAndReportsError() {
     val executor = Executors.newSingleThreadExecutor().also { it.shutdown() }
     val callback = CountDownLatch(1)
@@ -1699,13 +1756,6 @@ class CameraPreviewStateTest {
     val callbackCount = AtomicInteger()
     val receivedError = AtomicReference<Throwable?>()
     val errorReceived = CountDownLatch(1)
-    check(
-      captureHandler.post {
-        handlerBlocked.countDown()
-        check(releaseHandler.await(5, TimeUnit.SECONDS))
-      },
-    )
-    assertThat(handlerBlocked.await(5, TimeUnit.SECONDS)).isTrue()
     val dispatcher = PreviewSampledFrameDispatcher(
       mainHandler = captureHandler,
       intervalMillis = { 100 },
@@ -1727,6 +1777,13 @@ class CameraPreviewStateTest {
     )
 
     try {
+      check(
+        captureHandler.post {
+          handlerBlocked.countDown()
+          check(releaseHandler.await(15, TimeUnit.SECONDS))
+        },
+      )
+      assertThat(handlerBlocked.await(5, TimeUnit.SECONDS)).isTrue()
       dispatcher.start()
       now.set(1_100)
       dispatcher.offer(CameraFrameTransformIdentity(), isPreviewMirrored = false)
@@ -1779,7 +1836,7 @@ class CameraPreviewStateTest {
         if (identity === interruptedIdentity) {
           interruptedBitmap.set(bitmap)
           interruptedCaptureStarted.countDown()
-          check(releaseInterruptedCapture.await(5, TimeUnit.SECONDS))
+          check(releaseInterruptedCapture.await(15, TimeUnit.SECONDS))
         }
         CameraFrame.PreviewSampled(
           data = bitmap,
@@ -1856,13 +1913,6 @@ class CameraPreviewStateTest {
     val callbackReceived = CountDownLatch(1)
     val analysisDrained = CountDownLatch(1)
     val error = AtomicReference<Throwable?>()
-    check(
-      captureHandler.post {
-        handlerBlocked.countDown()
-        check(releaseHandler.await(5, TimeUnit.SECONDS))
-      },
-    )
-    assertThat(handlerBlocked.await(5, TimeUnit.SECONDS)).isTrue()
     val dispatcher = PreviewSampledFrameDispatcher(
       mainHandler = captureHandler,
       intervalMillis = { 100 },
@@ -1885,6 +1935,13 @@ class CameraPreviewStateTest {
     )
 
     try {
+      check(
+        captureHandler.post {
+          handlerBlocked.countDown()
+          check(releaseHandler.await(15, TimeUnit.SECONDS))
+        },
+      )
+      assertThat(handlerBlocked.await(5, TimeUnit.SECONDS)).isTrue()
       dispatcher.start()
       now.set(1_100)
       dispatcher.offer(firstIdentity, isPreviewMirrored = false)

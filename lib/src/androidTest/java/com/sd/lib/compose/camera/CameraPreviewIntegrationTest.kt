@@ -883,6 +883,7 @@ class CameraPreviewIntegrationTest {
     val error = AtomicReference<Throwable?>()
     val firstToken = AtomicReference<CameraFrameTransformToken?>()
     val firstFrame = CountDownLatch(1)
+    val retryStarted = AtomicBoolean()
     val retriedFrame = CountDownLatch(1)
 
     _composeRule.setContent {
@@ -892,18 +893,23 @@ class CameraPreviewIntegrationTest {
         onError = error::set,
         frameProcessor = FrameProcessor.Preview { frame ->
           val token = frame.transformToken
-          val initialToken = firstToken.get()
-          if (initialToken == null) {
-            if (firstToken.compareAndSet(null, token)) firstFrame.countDown()
-          } else if (!initialToken.isSameTransform(token)) {
-            retriedFrame.countDown()
+          if (state.isFrameTransformCurrent(token)) {
+            val initialToken = firstToken.get()
+            if (initialToken == null) {
+              if (firstToken.compareAndSet(null, token)) firstFrame.countDown()
+            } else if (retryStarted.get() && !initialToken.isSameTransform(token)) {
+              retriedFrame.countDown()
+            }
           }
         },
       )
     }
 
     assertThat(firstFrame.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
-    _composeRule.runOnIdle { state.retry() }
+    _composeRule.runOnIdle {
+      retryStarted.set(true)
+      state.retry()
+    }
     _composeRule.waitForIdle()
 
     assertThat(retriedFrame.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()

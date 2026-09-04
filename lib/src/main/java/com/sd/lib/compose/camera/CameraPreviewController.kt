@@ -941,6 +941,8 @@ internal class CameraFrameDispatcher(
     } catch (error: Throwable) {
       failure = error
     } finally {
+      // 用户回调遗留的中断状态不能影响相机缓冲区归还
+      Thread.interrupted()
       failure = releaseFrameBuffer(frame, failure)
     }
     reportOrThrow(failure)

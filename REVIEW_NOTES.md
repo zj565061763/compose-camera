@@ -77,7 +77,7 @@
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
 - `PreviewSampled` 请求在主线程真正开始截图前始终可以被更新请求替换；分析协调器提前取出调度任务不能固化待截图请求。
-- 用户回调保留的线程 interrupt 状态不得污染后续分析任务；采样截图等待被中断时，尚未开始的主线程任务必须取消，已经开始的任务结果必须显式回收。
+- 用户回调保留的线程 interrupt 状态必须在回调返回后、归还相机缓冲区前清除，不得污染缓冲区归还或后续分析任务；采样截图等待被中断时，尚未开始的主线程任务必须取消，已经开始的任务结果必须显式回收。
 - `Camera.PreviewCallback` 返回 `null` 缓冲区时必须报告 `CAMERA_RUNTIME_ERROR` 并停止当前会话，禁止让空值异常逃逸相机线程。
 - `TextureView.getBitmap()` 不会把 `setTransform()` 的内容矩阵烘入 Bitmap。`PreviewSampled` 和 `takeScreenshot()` 必须按当前 geometry 的内容比例截图，再显式绘制到浮点 content bounds 完成偏移和裁剪，禁止依赖平台 readback 应用显示矩阵。
 - 截图源按统一比例限制在旋转后的相机缓冲区尺寸以内，避免为已经被相机缓冲区限制的内容创建超大 Bitmap；geometry 为 identity 且不需要移除平台镜像时直接转交截图 Bitmap，禁止无条件复制第二张预览尺寸 Bitmap。
@@ -101,7 +101,7 @@
 
 ## 测试与验证
 
-- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、截图像素与所有权、token 失效、尺寸选择、首帧与 session 对焦协调、单次对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发和异常安全清理。
+- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、截图像素与所有权、token 失效、尺寸选择、首帧与 session 对焦协调、单次对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发、线程 interrupt 隔离和异常安全清理。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
