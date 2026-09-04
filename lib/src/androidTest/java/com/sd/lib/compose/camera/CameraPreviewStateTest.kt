@@ -5,7 +5,6 @@ package com.sd.lib.compose.camera
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.ImageFormat
-import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
@@ -18,6 +17,9 @@ import androidx.compose.ui.unit.IntSize
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
+import org.junit.Assert.assertThrows
+import org.junit.Test
+import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -26,9 +28,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import org.junit.Assert.assertThrows
-import org.junit.Test
-import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class CameraPreviewStateTest {
@@ -2186,12 +2185,6 @@ private data class SampledFrameResult(
   val threadName: String,
   val recycledDuringCallback: Boolean,
 )
-
-private fun assertMatrixEquals(actual: Matrix?, expected: Matrix) {
-  val actualValues = FloatArray(9).also(checkNotNull(actual)::getValues)
-  val expectedValues = FloatArray(9).also(expected::getValues)
-  assertThat(actualValues.asList()).containsExactlyElementsIn(expectedValues.asList()).inOrder()
-}
 
 private fun CameraFrameDispatcher.offerFrame(
   value: Int,
