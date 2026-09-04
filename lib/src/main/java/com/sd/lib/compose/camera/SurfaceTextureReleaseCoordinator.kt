@@ -3,7 +3,7 @@ package com.sd.lib.compose.camera
 import android.graphics.SurfaceTexture
 import java.util.WeakHashMap
 
-/** 延迟释放仍被相机会话使用的 SurfaceTexture。 */
+/** 延迟释放仍被相机会话使用的 SurfaceTexture */
 internal class SurfaceTextureReleaseCoordinator(
   private val releaseSurfaceTexture: (SurfaceTexture) -> Unit = SurfaceTexture::release,
 ) {

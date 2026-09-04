@@ -202,7 +202,7 @@ class CameraPreviewState internal constructor() {
     val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
     val orientedWidth = if (isQuarterTurn) config.bufferSize.height else config.bufferSize.width
     val orientedHeight = if (isQuarterTurn) config.bufferSize.width else config.bufferSize.height
-    // getBitmap 不应用 TextureView 内容矩阵，按内容比例截图后再显式绘制到预览区域
+    // getBitmap 不应用 TextureView 内容矩阵，按内容比例截图后再显式绘制到预览区域。
     val captureScale = minOf(
       1f,
       orientedWidth / geometry.contentSize.width,

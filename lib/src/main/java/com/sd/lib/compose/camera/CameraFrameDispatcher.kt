@@ -62,7 +62,7 @@ internal class CameraFrameDispatcher(
         rotationDegrees = frame.rotationDegrees,
         transformIdentity = frame.transformIdentity,
       )
-      // 取得当前 generation 的执行权后，此回调可以在停止过程中继续完成
+      // 取得当前 generation 的执行权后，此回调可以在停止过程中继续完成。
       if (synchronized(_lock) { !_closed && frame.dispatchGeneration == _dispatchGeneration }) {
         onFrame(callbackFrame)
       }

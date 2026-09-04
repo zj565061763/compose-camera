@@ -20,7 +20,7 @@ internal class PreviewSampledFrameDispatcher(
   private val _lock = Any()
   private val _analysisCoordinator = analysisCoordinator ?: CameraAnalysisCoordinator()
   private val _ownsAnalysisCoordinator = analysisCoordinator == null
-  // coordinator 只调度票据，主线程截图开始时才取得这里的最新请求
+  // coordinator 只调度票据，主线程截图开始时才取得这里的最新请求。
   private val _pending = AtomicReference<PendingSampledFrame?>()
   private var _started = false
   private var _closed = false
@@ -72,7 +72,7 @@ internal class PreviewSampledFrameDispatcher(
 
     var failure: Throwable? = null
     try {
-      // 取得当前 generation 的执行权后，此回调可以在停止过程中继续完成
+      // 取得当前 generation 的执行权后，此回调可以在停止过程中继续完成。
       if (isCurrent(runGeneration)) onFrame(frame)
     } catch (error: Throwable) {
       failure = error

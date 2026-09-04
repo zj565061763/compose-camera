@@ -5,7 +5,7 @@ import android.os.Looper
 
 private const val AUTO_FOCUS_TIMEOUT_MILLIS = 3_000L
 
-/** 消费当前会话首个有效预览更新，并把首帧和显式对焦请求投递到相机线程 */
+/** 消费当前会话首个有效预览更新，并把首帧和显式对焦请求投递到相机线程。 */
 internal class CameraPreviewAutoFocusCoordinator(
   private val post: (Runnable) -> Boolean,
   private val currentSessionIdentity: () -> CameraFrameTransformIdentity?,
@@ -61,7 +61,7 @@ internal class CameraPreviewAutoFocusCoordinator(
   }
 }
 
-/** 串行执行单次自动对焦请求，忙碌期间只保留一次待处理请求 */
+/** 串行执行单次自动对焦请求，忙碌期间只保留一次待处理请求。 */
 internal class OneShotAutoFocus(
   private val handler: Handler,
   private val timeoutMillis: Long = AUTO_FOCUS_TIMEOUT_MILLIS,

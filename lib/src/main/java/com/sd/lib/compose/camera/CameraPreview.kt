@@ -75,7 +75,7 @@ fun CameraPreview(
   }
   val frameProcessorMode = frameProcessor.mode
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
-  // 布局变化不重建 Controller，发布最新有效尺寸供下次开会话读取
+  // 布局变化不重建 Controller，发布最新有效尺寸供下次开会话读取。
   val latestPreviewViewSize = remember { AtomicReference(IntSize.Zero) }
   var activePreviewMirrored by remember { mutableStateOf<Boolean?>(null) }
 
@@ -135,7 +135,7 @@ fun CameraPreview(
   val failureDispatcher = remember(state, attemptIdentity) {
     MainThreadErrorDispatcher { error -> state.reportFailure(attemptIdentity, error) }
   }
-  // 设备枚举故障跨普通相机会话重建保留，只在设备状态或 retry 变化时失效
+  // 设备枚举故障跨普通相机会话重建保留，只在设备状态或 retry 变化时失效。
   val cameraDevicesAttemptIdentity = remember(state, devicesState, retryGeneration) {
     CameraDevicesAttemptIdentity()
   }

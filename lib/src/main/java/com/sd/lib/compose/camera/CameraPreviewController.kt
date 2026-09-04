@@ -293,7 +293,7 @@ internal class CameraPreviewController(
       stopCamera()
       return
     }
-    // 先清空旧生产者尚未消费的更新，再启用新会话首帧门控，避免漏掉同步提交的首帧
+    // 先清空旧生产者尚未消费的更新，再启用新会话首帧门控，避免漏掉同步提交的首帧。
     _autoFocusCoordinator.armFirstPreviewFrame(sessionIdentity)
     _sampledSurfaceFrameSession = _sampledFrameDispatcher?.let {
       SampledSurfaceFrameSession(

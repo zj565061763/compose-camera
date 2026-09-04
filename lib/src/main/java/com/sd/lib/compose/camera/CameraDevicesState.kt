@@ -55,7 +55,7 @@ class CameraDevicesState internal constructor() {
     _refreshAction = action
   }
 
-  /** 返回订阅前最近完成的刷新事件，由订阅者完成一次补发 */
+  /** 返回订阅前最近完成的刷新事件，由订阅者完成一次补发。 */
   @MainThread
   internal fun addRefreshListener(
     listener: (CameraDevicesRefreshEvent) -> Unit,
