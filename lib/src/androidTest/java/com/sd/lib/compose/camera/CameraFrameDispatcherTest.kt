@@ -187,7 +187,7 @@ class CameraFrameDispatcherTest {
   }
 
   @Test
-  fun frameDispatcher_discardPendingAfterDequeueDiscardsOldFrameAndContinues() {
+  fun frameDispatcher_requestStopAfterDequeueDiscardsOldFrameAndContinues() {
     val firstStarted = CountDownLatch(1)
     val releaseFirst = CountDownLatch(1)
     val secondDequeued = CountDownLatch(1)
@@ -224,7 +224,8 @@ class CameraFrameDispatcherTest {
       releaseFirst.countDown()
       assertThat(secondDequeued.await(5, TimeUnit.SECONDS)).isTrue()
 
-      dispatcher.discardPending()
+      dispatcher.requestStop()
+      dispatcher.start()
       dispatcher.offerFrame(3, returned, buffersReturned)
       releaseSecondStart.countDown()
 
@@ -294,7 +295,7 @@ class CameraFrameDispatcherTest {
       releaseFirst.countDown()
 
       assertThat(firstClosed.await(5, TimeUnit.SECONDS)).isTrue()
-      firstDispatcher.discardPending()
+      firstDispatcher.stop()
       assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(seen).containsExactly(1, 3).inOrder()

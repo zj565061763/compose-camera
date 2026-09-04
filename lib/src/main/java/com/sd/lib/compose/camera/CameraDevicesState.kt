@@ -125,12 +125,7 @@ private fun <T> notifyListeners(listeners: List<(T) -> Unit>, value: T) {
     try {
       listener(value)
     } catch (error: Exception) {
-      val previousFailure = firstFailure
-      if (previousFailure == null) {
-        firstFailure = error
-      } else if (previousFailure !== error) {
-        previousFailure.addSuppressed(error)
-      }
+      firstFailure = mergeFailures(firstFailure, error)
     }
   }
   firstFailure?.also { throw it }

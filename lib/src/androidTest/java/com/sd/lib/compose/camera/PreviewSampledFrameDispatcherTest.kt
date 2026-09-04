@@ -460,7 +460,7 @@ class PreviewSampledFrameDispatcherTest {
   }
 
   @Test
-  fun sampledFrameDispatcher_restartDiscardsPreviousCaptureBeforeCallback() {
+  fun sampledFrameDispatcher_requestStopDiscardsPreviousCaptureBeforeCallback() {
     val now = AtomicLong(1_000)
     val captureStarted = CountDownLatch(1)
     val releaseCapture = CountDownLatch(1)
@@ -485,7 +485,7 @@ class PreviewSampledFrameDispatcherTest {
     dispatcher.offer(CameraFrameTransformIdentity(), isPreviewMirrored = false)
     assertThat(captureStarted.await(5, TimeUnit.SECONDS)).isTrue()
 
-    dispatcher.stop()
+    dispatcher.requestStop()
     now.set(2_000)
     dispatcher.start()
     releaseCapture.countDown()

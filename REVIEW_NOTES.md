@@ -75,7 +75,7 @@
 
 - 只有使用原始 `Preview` 帧处理时才创建三个 NV21 回调缓冲区；名为 `CameraPreview-Analysis` 的单线程 executor 在首个分析任务到达时懒创建，并由单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用。
 - 原始帧和采样帧共享分析串行协调器；旧回调完成前，新 generation 只能合并保留最新待处理任务，禁止并发进入用户回调。
-- generation 有效性检查和进入用户回调必须由同一个回调门控保护。会话停止或 dispatcher 关闭先使尚未取得执行权的任务失效，再在相机线程等待已经取得执行权的同步回调完成；主线程只提交异步清理，不得直接等待用户回调。
+- generation 有效性检查和进入用户回调必须由同一个回调门控保护。Lifecycle 停止、Surface 销毁或 dispatcher 关闭时，主线程必须先同步关闭新任务准入并使尚未取得执行权的任务失效；相机线程随后等待已经取得执行权的同步回调完成并清理资源，主线程不得直接等待用户回调。
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用当前会话的 `onSurfaceTextureUpdated` 作为采样节拍，不注册相机帧回调；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
 - `PreviewSampled` 请求在主线程真正开始截图前始终可以被更新请求替换；分析协调器提前取出调度任务不能固化待截图请求。
@@ -99,6 +99,7 @@
 - `CameraPreviewException` 区分无设备、目标不存在、打开或配置失败以及运行错误，并保留平台错误码或 cause。
 - 清理必须尝试全部普通步骤：停止帧回调、清除相机错误回调、停止预览、释放相机、清空会话状态和关闭分析 executor。
 - 一个普通 `Exception` 不能跳过后续清理；多个普通异常汇总到首个异常的 suppressed 中。致命 `Error` 不得被吞掉。
+- Controller 或 Runtime 初始化中途失败时必须按已取得的所有权逆序回收；Camera Handler 拒绝任务时必须把 Runtime 标记为失效，后续重建不得复用该 Handler，等待帧回调和降级释放不得阻塞主线程。
 - 所有异步帧在写结果前必须确认 transform token 仍属于当前会话和布局。
 
 ## 测试与验证

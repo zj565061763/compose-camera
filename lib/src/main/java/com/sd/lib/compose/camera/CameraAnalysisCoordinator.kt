@@ -71,7 +71,7 @@ internal class CameraAnalysisCoordinator(
         val discardFailure = schedulingFailure?.takeUnless { synchronized(_lock) { _closed } }
         current.discard(discardFailure)
       } catch (error: Throwable) {
-        failure = mergeFrameFailures(failure, error)
+        failure = mergeFailures(failure, error)
       }
       analysis = takeNext()
     }
@@ -85,7 +85,7 @@ internal class CameraAnalysisCoordinator(
       try {
         analysis.process()
       } catch (error: Throwable) {
-        failure = mergeFrameFailures(failure, error)
+        failure = mergeFailures(failure, error)
       }
       // 共享协调中的任务需要隔离用户回调留下的 interrupt 状态
       Thread.interrupted()
@@ -95,7 +95,7 @@ internal class CameraAnalysisCoordinator(
         try {
           schedule(next)
         } catch (error: Throwable) {
-          failure = mergeFrameFailures(failure, error)
+          failure = mergeFailures(failure, error)
         }
         break
       }
@@ -130,7 +130,7 @@ internal class CameraAnalysisCoordinator(
     try {
       executor?.shutdown()
     } catch (error: Throwable) {
-      failure = mergeFrameFailures(failure, error)
+      failure = mergeFailures(failure, error)
     }
     failure?.also { throw it }
   }

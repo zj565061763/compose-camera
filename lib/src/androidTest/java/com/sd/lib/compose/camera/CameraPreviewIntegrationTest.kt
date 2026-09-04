@@ -1150,6 +1150,55 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
+  fun close_afterCameraThreadTerminatesUsesFallbackCleanup() {
+    val initialCameraThreads = activeCameraThreads()
+    val lifecycleOwner = FakeLifecycleOwner()
+    val receivedErrors = CopyOnWriteArrayList<Throwable>()
+    lateinit var runtime: CameraPreviewRuntime
+    lateinit var controller: CameraPreviewController
+    lateinit var cameraThread: Thread
+    lateinit var textureView: TextureView
+
+    _composeRule.runOnUiThread {
+      textureView = TextureView(_composeRule.activity)
+      runtime = CameraPreviewRuntime()
+      val runtimeLease = runtime.acquire()
+      cameraThread = runtimeLease.cameraHandler.looper.thread
+      controller = CameraPreviewController(
+        runtimeLease = runtimeLease,
+        lifecycleOwner = lifecycleOwner,
+        textureView = textureView,
+        cameraId = null,
+        displayRotation = Surface.ROTATION_0,
+        previewViewSizeProvider = { IntSize(240, 240) },
+        transformIdentityProvider = { null },
+        onSessionStarted = { _, _, _, _ -> error("Camera session must not start.") },
+        onPreviewFrameAvailable = { error("Preview frame must not be published.") },
+        frameProcessor = ActiveFrameProcessor.None,
+        captureSampledFrame = { _, _ -> null },
+        onSessionFailure = receivedErrors::add,
+        onError = receivedErrors::add,
+        onSessionClosed = {},
+      )
+      controller.start()
+      runtimeLease.cameraHandler.looper.quitSafely()
+      runtime.close()
+    }
+    cameraThread.join(CLEANUP_TIMEOUT_MILLIS)
+    assertThat(cameraThread.isAlive).isFalse()
+
+    _composeRule.runOnUiThread { controller.close() }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      textureView.surfaceTextureListener == null
+    }
+
+    assertThat(activeCameraThreads() - initialCameraThreads).isEmpty()
+    assertThat(receivedErrors).hasSize(1)
+    assertThat(receivedErrors.single()).isInstanceOf(IllegalStateException::class.java)
+    assertThat(receivedErrors.single()).hasMessageThat().contains("camera operation thread")
+  }
+
+  @Test
   fun destroyedLifecycleOwner_releasesSessionAndWorkerThreads() {
     assumeCameraAvailable()
     val initialCameraThreads = activeCameraThreads()

@@ -100,14 +100,23 @@ internal class PreviewSampledFrameDispatcher(
     }
   }
 
-  fun stop() {
+  fun requestStop() {
     synchronized(_lock) {
-      _started = false
-      _pending.set(null)
-      _runGeneration = _callbackGate.advanceGeneration()
+      if (_started && !_closed) {
+        _started = false
+        _pending.set(null)
+        _runGeneration = _callbackGate.advanceGeneration()
+      }
     }
-    _callbackGate.awaitIdle()
-    _analysisCoordinator.discardPending(this)
+  }
+
+  fun stop() {
+    requestStop()
+    try {
+      _analysisCoordinator.discardPending(this)
+    } finally {
+      _callbackGate.awaitIdle()
+    }
   }
 
   fun requestClose() {
@@ -162,7 +171,7 @@ private fun captureSampledFrameOnHandlerThread(
         }
       }
     } catch (cleanupFailure: Throwable) {
-      failure = mergeFrameFailures(failure, cleanupFailure)
+      failure = mergeFailures(failure, cleanupFailure)
     } finally {
       Thread.currentThread().interrupt()
     }
@@ -221,7 +230,7 @@ private fun recycleSampledFrame(
     frame.data.recycle()
     failure
   } catch (recycleFailure: Throwable) {
-    mergeFrameFailures(failure, recycleFailure)
+    mergeFailures(failure, recycleFailure)
   }
 }
 

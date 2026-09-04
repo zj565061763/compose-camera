@@ -74,6 +74,7 @@ internal class CameraPreviewController(
   private var _requestGeneration = 0L
   @Volatile
   private var _closed = false
+  private var _cameraThreadFailureReported = false
   private val _autoFocusCoordinator = CameraPreviewAutoFocusCoordinator(
     post = _cameraHandler::post,
     currentSessionIdentity = { _sessionIdentity },
@@ -126,14 +127,19 @@ internal class CameraPreviewController(
   fun start() {
     if (_started || _closed) return
     _started = true
-    if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
-      failAndClose(IllegalStateException("CameraPreview cannot use a destroyed LifecycleOwner."))
-      return
+    try {
+      if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
+        failAndClose(IllegalStateException("CameraPreview cannot use a destroyed LifecycleOwner."))
+        return
+      }
+      lifecycleOwner.lifecycle.addObserver(_lifecycleObserver)
+      if (_closed) return
+      textureView.surfaceTextureListener = _surfaceTextureListener
+      _surfaceTexture = textureView.surfaceTexture.takeIf { textureView.isAvailable }
+      updateCameraRequest()
+    } catch (error: Throwable) {
+      throwAfterCleanup(error, listOf(::close))
     }
-    lifecycleOwner.lifecycle.addObserver(_lifecycleObserver)
-    textureView.surfaceTextureListener = _surfaceTextureListener
-    _surfaceTexture = textureView.surfaceTexture.takeIf { textureView.isAvailable }
-    updateCameraRequest()
   }
 
   @MainThread
@@ -154,21 +160,25 @@ internal class CameraPreviewController(
       return
     }
 
+    if (!shouldRun) requestFrameDispatchersStop()
     _shouldRun = shouldRun
     val generation = ++_requestGeneration
     if (shouldRun) {
-      _cameraHandler.post { startCameraIfReady(generation, checkNotNull(surfaceTexture)) }
+      if (!_cameraHandler.post { startCameraIfReady(generation, checkNotNull(surfaceTexture)) }) {
+        failAfterCameraThreadFailure()
+      }
     } else {
       postStopCamera(surfaceTextureToRelease)
     }
   }
 
   private fun postStopCamera(surfaceTextureToRelease: SurfaceTexture? = null) {
-    postStopThenRelease(
+    val posted = postStopThenRelease(
       post = _cameraHandler::post,
       stop = ::stopCamera,
       release = { surfaceTextureToRelease?.also(::requestSurfaceTextureRelease) },
     )
+    if (!posted && !_closed) failAfterCameraThreadFailure()
   }
 
   private fun postReleaseSurfaceTexture(surfaceTexture: SurfaceTexture) {
@@ -210,12 +220,7 @@ internal class CameraPreviewController(
       if (isCurrentStartRequest(generation)) reportSessionFailure(cameraOpenException(resolvedCameraId, error))
       stopCamera()
     } catch (error: Error) {
-      try {
-        stopCamera()
-      } catch (cleanupFailure: Throwable) {
-        if (cleanupFailure !== error) error.addSuppressed(cleanupFailure)
-      }
-      throw error
+      throwAfterCleanup(error, listOf(::stopCamera))
     }
   }
 
@@ -277,6 +282,7 @@ internal class CameraPreviewController(
       stopCamera()
       return
     }
+    _previewFrameDispatcher?.start()
     configureFrameCallback(
       camera = camera,
       bufferSize = bufferSize,
@@ -402,22 +408,55 @@ internal class CameraPreviewController(
     close()
   }
 
+  @MainThread
+  private fun failAfterCameraThreadFailure() {
+    reportCameraThreadFailure(isSessionFailure = true)
+    close()
+  }
+
+  @MainThread
+  private fun reportCameraThreadFailure(isSessionFailure: Boolean = false) {
+    if (_cameraThreadFailureReported) return
+    _cameraThreadFailureReported = true
+    _runtimeLease.invalidateRuntime()
+    val error = cameraOperationThreadUnavailableException()
+    if (isSessionFailure) reportSessionFailure(error) else onError(error)
+  }
+
+  private fun requestFrameDispatchersStop() {
+    _previewFrameDispatcher?.requestStop()
+    _sampledFrameDispatcher?.requestStop()
+  }
+
   private fun stopCamera() {
     checkCameraOperationThread()
+    stopCameraSession()
+  }
+
+  private fun stopCameraAfterCameraThreadTermination() {
+    check(!_cameraHandler.looper.thread.isAlive) {
+      "The camera operation thread must stop before fallback cleanup."
+    }
+    stopCameraSession()
+  }
+
+  private fun stopCameraSession() {
+    requestFrameDispatchersStop()
     val camera = _camera
+    val oneShotAutoFocus = _oneShotAutoFocus
     val sessionIdentity = _sessionIdentity
     val cameraSurfaceTexture = _cameraSurfaceTexture
-    _oneShotAutoFocus?.close()
     _oneShotAutoFocus = null
     _camera = null
     _sessionIdentity = null
     _sampledSurfaceFrameSession = null
     _autoFocusCoordinator.clearFirstPreviewFrame()
     _cameraSurfaceTexture = null
-    _previewFrameDispatcher?.discardPending()
-    _sampledFrameDispatcher?.stop()
-    runCameraCleanupActions(
+    runCleanupActions(
       actions = buildList {
+        oneShotAutoFocus?.also { add(it::close) }
+        _previewFrameDispatcher?.also { add(it::stop) }
+        _sampledFrameDispatcher?.also { add(it::stop) }
         if (camera != null) {
           add { camera.setPreviewCallbackWithBuffer(null) }
           add { camera.setErrorCallback(null) }
@@ -447,7 +486,7 @@ internal class CameraPreviewController(
   }
 
   private fun closeFrameDispatchers(finalAction: () -> Unit): Exception? {
-    return runCameraCleanupActions(
+    return runCleanupActions(
       actions = buildList {
         _previewFrameDispatcher?.also { dispatcher -> add(dispatcher::close) }
         _sampledFrameDispatcher?.also { dispatcher -> add(dispatcher::close) }
@@ -464,39 +503,62 @@ internal class CameraPreviewController(
     _surfaceTexture = null
   }
 
+  private fun finishClose(stopCameraAction: () -> Unit) {
+    runCleanupActions(
+      actions = listOf(
+        { closeFrameDispatchers(stopCameraAction)?.also(onError) },
+        { callOnMainThread(::detachSurfaceTextureListener) },
+      ),
+      finalAction = _runtimeLease::close,
+    )?.also(onError)
+  }
+
+  @MainThread
+  private fun scheduleClose() {
+    val closeTask = Runnable { finishClose(::stopCamera) }
+    if (_cameraHandler.post(closeTask)) return
+
+    reportCameraThreadFailure()
+    val cameraThread = _cameraHandler.looper.thread
+    try {
+      Thread(
+        {
+          awaitThreadTerminationUninterruptibly(cameraThread)
+          finishClose(::stopCameraAfterCameraThreadTermination)
+        },
+        CAMERA_OPERATION_CLEANUP_THREAD_NAME,
+      ).start()
+    } catch (error: Exception) {
+      var failure = error
+      try {
+        runCleanupActions(
+          actions = listOf(::detachSurfaceTextureListener),
+          finalAction = _runtimeLease::close,
+        )?.also { cleanupFailure -> failure = mergeFailures(failure, cleanupFailure) }
+      } catch (cleanupFailure: Error) {
+        throw mergeFailures(failure, cleanupFailure)
+      }
+      onError(failure)
+    } catch (error: Error) {
+      throwAfterCleanup(
+        error,
+        listOf(::detachSurfaceTextureListener, _runtimeLease::close),
+      )
+    }
+  }
+
   @MainThread
   override fun close() {
     if (_closed) return
     _closed = true
     _shouldRun = false
     _requestGeneration++
-    lifecycleOwner.lifecycle.removeObserver(_lifecycleObserver)
     _previewFrameDispatcher?.requestClose()
     _sampledFrameDispatcher?.requestClose()
-    val closeTask = Runnable {
-      try {
-        closeFrameDispatchers(::stopCamera)?.also(onError)
-      } finally {
-        try {
-          callOnMainThread(::detachSurfaceTextureListener)
-        } finally {
-          _runtimeLease.close()
-        }
-      }
-    }
-    if (!_cameraHandler.post(closeTask)) {
-      try {
-        closeFrameDispatchers {
-          throw IllegalStateException("The camera operation thread is not available.")
-        }?.also(onError)
-      } finally {
-        try {
-          detachSurfaceTextureListener()
-        } finally {
-          _runtimeLease.close()
-        }
-      }
-    }
+    runCleanupActions(
+      actions = listOf { lifecycleOwner.lifecycle.removeObserver(_lifecycleObserver) },
+      finalAction = ::scheduleClose,
+    )?.also(onError)
   }
 }
 
@@ -506,4 +568,9 @@ private data class SampledSurfaceFrameSession(
 )
 
 private const val CAMERA_CALLBACK_BUFFER_COUNT = 3
+private const val CAMERA_OPERATION_CLEANUP_THREAD_NAME = "CameraPreview-Camera-Cleanup"
 private val SURFACE_TEXTURE_RELEASE_COORDINATOR = SurfaceTextureReleaseCoordinator()
+
+private fun cameraOperationThreadUnavailableException(): IllegalStateException {
+  return IllegalStateException("The camera operation thread is not available.")
+}

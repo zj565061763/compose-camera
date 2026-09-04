@@ -18,7 +18,7 @@ class CameraPreviewCleanupTest {
     val firstFailure = IllegalStateException("first")
     val secondFailure = IllegalArgumentException("second")
 
-    val failure = runCameraCleanupActions(
+    val failure = runCleanupActions(
       actions = listOf(
         {
           calls += 1
@@ -39,10 +39,38 @@ class CameraPreviewCleanupTest {
   }
 
   @Test
+  fun cleanupActions_runAllActionsAndRethrowFatalFailure() {
+    val calls = mutableListOf<Int>()
+    val ordinaryFailure = IllegalStateException("ordinary")
+    val fatalFailure = AssertionError("fatal")
+
+    val thrown = assertThrows(AssertionError::class.java) {
+      runCleanupActions(
+        actions = listOf(
+          {
+            calls += 1
+            throw ordinaryFailure
+          },
+          {
+            calls += 2
+            throw fatalFailure
+          },
+          { calls += 3 },
+        ),
+        finalAction = { calls += 4 },
+      )
+    }
+
+    assertThat(calls).containsExactly(1, 2, 3, 4).inOrder()
+    assertThat(thrown).isSameInstanceAs(fatalFailure)
+    assertThat(fatalFailure.suppressed.asList()).containsExactly(ordinaryFailure)
+  }
+
+  @Test
   fun postStopThenRelease_stopsBeforeReleasingSurface() {
     val calls = mutableListOf<String>()
 
-    postStopThenRelease(
+    val posted = postStopThenRelease(
       post = { task ->
         task.run()
         true
@@ -51,7 +79,22 @@ class CameraPreviewCleanupTest {
       release = { calls += "release" },
     )
 
+    assertThat(posted).isTrue()
     assertThat(calls).containsExactly("stop", "release").inOrder()
+  }
+
+  @Test
+  fun postStopThenRelease_rejectionTransfersReleaseWithoutStopping() {
+    val calls = mutableListOf<String>()
+
+    val posted = postStopThenRelease(
+      post = { false },
+      stop = { calls += "stop" },
+      release = { calls += "release" },
+    )
+
+    assertThat(posted).isFalse()
+    assertThat(calls).containsExactly("release")
   }
 
   @Test
@@ -93,5 +136,35 @@ class CameraPreviewCleanupTest {
     assertThat(released.get()).isEqualTo(1)
     assertThrows(IllegalStateException::class.java) { coordinator.retain(surfaceTexture) }
     surfaceTexture.release()
+  }
+
+  @Test
+  fun throwAfterCleanup_runsAllActionsAndPrefersFatalFailure() {
+    val initialFailure = IllegalStateException("initial")
+    val ordinaryCleanupFailure = IllegalArgumentException("ordinary cleanup")
+    val fatalCleanupFailure = AssertionError("fatal cleanup")
+    val calls = mutableListOf<Int>()
+
+    val thrown = assertThrows(AssertionError::class.java) {
+      throwAfterCleanup(
+        initialFailure,
+        listOf(
+          {
+            calls += 1
+            throw ordinaryCleanupFailure
+          },
+          {
+            calls += 2
+            throw fatalCleanupFailure
+          },
+          { calls += 3 },
+        ),
+      )
+    }
+
+    assertThat(calls).containsExactly(1, 2, 3).inOrder()
+    assertThat(thrown).isSameInstanceAs(fatalCleanupFailure)
+    assertThat(fatalCleanupFailure.suppressed.asList()).containsExactly(initialFailure)
+    assertThat(initialFailure.suppressed.asList()).containsExactly(ordinaryCleanupFailure)
   }
 }

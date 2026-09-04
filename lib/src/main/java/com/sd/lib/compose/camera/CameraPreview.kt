@@ -189,66 +189,89 @@ fun CameraPreview(
       onDispose { }
     } else {
       val failureSubscription = MainThreadErrorSubscription(failureDispatcher)
-      val runtimeLease = runtimeStore.acquire()
-      val controller = CameraPreviewController(
-        runtimeLease = runtimeLease,
-        lifecycleOwner = lifecycleOwner,
-        textureView = currentTextureView,
-        cameraId = cameraId,
-        displayRotation = effectiveDisplayRotation,
-        previewViewSizeProvider = latestPreviewViewSize::get,
-        transformIdentityProvider = state::currentTransformIdentity,
-        onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
-          val started = state.startSession(
-            attemptIdentity = attemptIdentity,
-            sessionIdentity = sessionIdentity,
-            bufferSize = bufferSize,
-            rotationDegrees = rotationDegrees,
-            isPreviewMirrored = isPreviewMirrored,
-            isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
-          )
-          if (started) activePreviewMirrored = isPreviewMirrored
-          started
-        },
-        onPreviewFrameAvailable = { sessionIdentity ->
-          state.markPreviewFrameAvailable(sessionIdentity)?.also(currentTextureView::setTransform)
-        },
-        frameProcessor = when (frameProcessorMode) {
-          FrameProcessorMode.NONE -> ActiveFrameProcessor.None
-          FrameProcessorMode.PREVIEW -> ActiveFrameProcessor.Preview { frame ->
-            (currentFrameProcessor as? FrameProcessor.Preview)?.onFrame?.invoke(frame)
-          }
-          FrameProcessorMode.PREVIEW_SAMPLED -> ActiveFrameProcessor.PreviewSampled(
-            intervalMillis = {
-              (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.intervalMillis ?: Long.MAX_VALUE
-            },
-            onFrame = { frame ->
-              (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.onFrame?.invoke(frame)
-            },
-          )
-        },
-        captureSampledFrame = { sessionIdentity, isPreviewMirrored ->
-          capturePreviewSampledFrame(
-            state = state,
-            sessionIdentity = sessionIdentity,
-            isPreviewMirrored = isPreviewMirrored,
-            captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
-          )
-        },
-        onSessionFailure = failureSubscription::dispatch,
-        onError = errorDispatcher::dispatch,
-        onSessionClosed = { sessionIdentity ->
-          if (state.clearSession(sessionIdentity)) activePreviewMirrored = null
-        },
-        autoFocusOperationsFactory = autoFocusOperationsFactory,
-      )
-      controller.start()
+      val runtimeLease = try {
+        runtimeStore.acquire()
+      } catch (error: Throwable) {
+        throwAfterCleanup(error, listOf(failureSubscription::close))
+      }
+      val controller = try {
+        CameraPreviewController(
+          runtimeLease = runtimeLease,
+          lifecycleOwner = lifecycleOwner,
+          textureView = currentTextureView,
+          cameraId = cameraId,
+          displayRotation = effectiveDisplayRotation,
+          previewViewSizeProvider = latestPreviewViewSize::get,
+          transformIdentityProvider = state::currentTransformIdentity,
+          onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
+            val started = state.startSession(
+              attemptIdentity = attemptIdentity,
+              sessionIdentity = sessionIdentity,
+              bufferSize = bufferSize,
+              rotationDegrees = rotationDegrees,
+              isPreviewMirrored = isPreviewMirrored,
+              isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
+            )
+            if (started) activePreviewMirrored = isPreviewMirrored
+            started
+          },
+          onPreviewFrameAvailable = { sessionIdentity ->
+            state.markPreviewFrameAvailable(sessionIdentity)?.also(currentTextureView::setTransform)
+          },
+          frameProcessor = when (frameProcessorMode) {
+            FrameProcessorMode.NONE -> ActiveFrameProcessor.None
+            FrameProcessorMode.PREVIEW -> ActiveFrameProcessor.Preview { frame ->
+              (currentFrameProcessor as? FrameProcessor.Preview)?.onFrame?.invoke(frame)
+            }
+            FrameProcessorMode.PREVIEW_SAMPLED -> ActiveFrameProcessor.PreviewSampled(
+              intervalMillis = {
+                (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.intervalMillis ?: Long.MAX_VALUE
+              },
+              onFrame = { frame ->
+                (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.onFrame?.invoke(frame)
+              },
+            )
+          },
+          captureSampledFrame = { sessionIdentity, isPreviewMirrored ->
+            capturePreviewSampledFrame(
+              state = state,
+              sessionIdentity = sessionIdentity,
+              isPreviewMirrored = isPreviewMirrored,
+              captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
+            )
+          },
+          onSessionFailure = failureSubscription::dispatch,
+          onError = errorDispatcher::dispatch,
+          onSessionClosed = { sessionIdentity ->
+            if (state.clearSession(sessionIdentity)) activePreviewMirrored = null
+          },
+          autoFocusOperationsFactory = autoFocusOperationsFactory,
+        )
+      } catch (error: Throwable) {
+        throwAfterCleanup(error, listOf(failureSubscription::close, runtimeLease::close))
+      }
       val requestFocusAction: () -> Unit = controller::requestFocus
-      state.attachRequestFocusAction(requestFocusAction)
-      onDispose {
-        state.detachRequestFocusAction(requestFocusAction)
-        failureSubscription.close()
-        controller.close()
+      try {
+        controller.start()
+        state.attachRequestFocusAction(requestFocusAction)
+        onDispose {
+          runCleanupActions(
+            actions = listOf(
+              { state.detachRequestFocusAction(requestFocusAction) },
+              failureSubscription::close,
+            ),
+            finalAction = controller::close,
+          )?.also(errorDispatcher::dispatch)
+        }
+      } catch (error: Throwable) {
+        throwAfterCleanup(
+          error,
+          listOf(
+            { state.detachRequestFocusAction(requestFocusAction) },
+            failureSubscription::close,
+            controller::close,
+          ),
+        )
       }
     }
   }

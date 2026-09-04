@@ -9,7 +9,7 @@ internal fun postStopThenRelease(
   post: (Runnable) -> Boolean,
   stop: () -> Unit,
   release: () -> Unit,
-) {
+): Boolean {
   val task = Runnable {
     try {
       stop()
@@ -17,7 +17,9 @@ internal fun postStopThenRelease(
       release()
     }
   }
-  if (!post(task)) release()
+  return post(task).also { posted ->
+    if (!posted) release()
+  }
 }
 
 internal fun reportNullPreviewCallbackAndStop(
@@ -45,30 +47,38 @@ internal fun <T> callOnHandlerThread(handler: Handler, action: () -> T): T {
   }
 }
 
-/** 执行全部普通清理；即使发生异常，也始终执行最后的资源释放。 */
-internal fun runCameraCleanupActions(
+internal fun awaitThreadTerminationUninterruptibly(thread: Thread) {
+  var interrupted = false
+  while (thread.isAlive) {
+    try {
+      thread.join()
+    } catch (_: InterruptedException) {
+      interrupted = true
+    }
+  }
+  if (interrupted) Thread.currentThread().interrupt()
+}
+
+/** 尝试全部清理操作，汇总普通异常并在完成后重新抛出致命错误。 */
+internal fun runCleanupActions(
   actions: List<() -> Unit>,
   finalAction: () -> Unit,
 ): Exception? {
-  var firstFailure: Exception? = null
+  var failure: Throwable? = null
 
   fun runAction(action: () -> Unit) {
     try {
       action()
-    } catch (error: Exception) {
-      val previousFailure = firstFailure
-      if (previousFailure == null) {
-        firstFailure = error
-      } else if (previousFailure !== error) {
-        previousFailure.addSuppressed(error)
-      }
+    } catch (error: Throwable) {
+      failure = mergeFailures(failure, error)
     }
   }
 
-  try {
-    actions.forEach(::runAction)
-  } finally {
-    runAction(finalAction)
+  actions.forEach(::runAction)
+  runAction(finalAction)
+  return when (val result = failure) {
+    null -> null
+    is Exception -> result
+    else -> throw result
   }
-  return firstFailure
 }

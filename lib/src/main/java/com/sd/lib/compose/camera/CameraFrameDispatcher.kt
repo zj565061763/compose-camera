@@ -16,7 +16,14 @@ internal class CameraFrameDispatcher(
   private val _ownsAnalysisCoordinator = analysisCoordinator == null
   private val _callbackGate = FrameCallbackGate()
   private var _acceptingFrames = true
+  private var _closed = false
   private var _closeCompleted = false
+
+  fun start() {
+    synchronized(_offerLock) {
+      if (!_closed) _acceptingFrames = true
+    }
+  }
 
   fun offer(
     data: ByteArray,
@@ -79,10 +86,19 @@ internal class CameraFrameDispatcher(
     reportOrThrow(failure)
   }
 
-  fun discardPending() {
+  fun requestStop() {
+    synchronized(_offerLock) {
+      if (_acceptingFrames && !_closed) {
+        _acceptingFrames = false
+        _callbackGate.advanceGeneration()
+      }
+    }
+  }
+
+  fun stop() {
+    requestStop()
     try {
       synchronized(_offerLock) {
-        _callbackGate.advanceGeneration()
         _analysisCoordinator.discardPending(this)
       }
     } finally {
@@ -92,7 +108,8 @@ internal class CameraFrameDispatcher(
 
   fun requestClose() {
     synchronized(_offerLock) {
-      if (_acceptingFrames) {
+      if (!_closed) {
+        _closed = true
         _acceptingFrames = false
         _callbackGate.closeAdmission()
       }
@@ -139,16 +156,6 @@ internal fun reportFrameFailure(failure: Throwable?, onError: (Throwable) -> Uni
   }
 }
 
-internal fun mergeFrameFailures(failure: Throwable?, nextFailure: Throwable): Throwable {
-  return when {
-    failure == null -> nextFailure
-    failure is Error || nextFailure !is Error -> failure.also {
-      if (failure !== nextFailure) failure.addSuppressed(nextFailure)
-    }
-    else -> nextFailure.also { nextFailure.addSuppressed(failure) }
-  }
-}
-
 private fun releaseFrameBuffer(frame: PendingCameraFrame, failure: Throwable? = null): Throwable? {
   return releaseFrameBuffer(frame.data, frame.returnBuffer, failure)
 }
@@ -162,7 +169,7 @@ internal fun releaseFrameBuffer(
     returnBuffer(data)
     failure
   } catch (returnFailure: Throwable) {
-    mergeFrameFailures(failure, returnFailure)
+    mergeFailures(failure, returnFailure)
   }
 }
 
