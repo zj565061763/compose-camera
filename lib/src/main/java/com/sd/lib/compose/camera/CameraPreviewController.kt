@@ -889,6 +889,7 @@ internal class CameraFrameDispatcher(
   private val beforeFrameStart: (() -> Unit)? = null,
 ) : AutoCloseable {
   private val _lock = Any()
+  private var _dispatchGeneration = 0L
   private var _closed = false
 
   fun offer(
@@ -903,19 +904,20 @@ internal class CameraFrameDispatcher(
       reportOrThrow(releaseFrameBuffer(data, returnBuffer))
       return
     }
-    val frame = PendingCameraFrame(
-      data = data,
-      width = width,
-      height = height,
-      rotationDegrees = rotationDegrees,
-      transformIdentity = transformIdentity,
-      returnBuffer = returnBuffer,
-    )
     var shouldDiscard = false
     synchronized(_lock) {
       if (_closed) {
         shouldDiscard = true
       } else {
+        val frame = PendingCameraFrame(
+          data = data,
+          width = width,
+          height = height,
+          rotationDegrees = rotationDegrees,
+          transformIdentity = transformIdentity,
+          dispatchGeneration = _dispatchGeneration,
+          returnBuffer = returnBuffer,
+        )
         analysisCoordinator.offer(
           owner = this,
           execute = executor::execute,
@@ -924,15 +926,15 @@ internal class CameraFrameDispatcher(
         )
       }
     }
-    if (shouldDiscard) reportOrThrow(releaseFrameBuffer(frame))
+    if (shouldDiscard) reportOrThrow(releaseFrameBuffer(data, returnBuffer))
   }
 
   private fun process(frame: PendingCameraFrame) {
     var failure: Throwable? = null
     try {
       beforeFrameStart?.invoke()
-      // 与 close() 共用锁，将已出队帧的开始点线性化
-      if (synchronized(_lock) { !_closed }) {
+      // 与关闭和会话停止共用锁，将已出队帧的开始点线性化
+      if (synchronized(_lock) { !_closed && frame.dispatchGeneration == _dispatchGeneration }) {
         onFrame(
           CameraFrame.Preview(
             data = frame.data,
@@ -954,7 +956,10 @@ internal class CameraFrameDispatcher(
   }
 
   fun discardPending() {
-    analysisCoordinator.discardPending(this)
+    synchronized(_lock) {
+      _dispatchGeneration++
+      analysisCoordinator.discardPending(this)
+    }
   }
 
   override fun close() {
@@ -1263,6 +1268,7 @@ private data class PendingCameraFrame(
   val height: Int,
   val rotationDegrees: Int,
   val transformIdentity: CameraFrameTransformIdentity?,
+  val dispatchGeneration: Long,
   val returnBuffer: (ByteArray) -> Unit,
 )
 

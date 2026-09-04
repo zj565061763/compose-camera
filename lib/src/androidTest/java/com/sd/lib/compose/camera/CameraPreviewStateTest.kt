@@ -1476,6 +1476,60 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun frameDispatcher_discardPendingAfterDequeueDiscardsOldFrameAndContinues() {
+    val firstStarted = CountDownLatch(1)
+    val releaseFirst = CountDownLatch(1)
+    val secondDequeued = CountDownLatch(1)
+    val releaseSecondStart = CountDownLatch(1)
+    val callbacks = CountDownLatch(2)
+    val buffersReturned = CountDownLatch(3)
+    val frameStartCount = AtomicInteger()
+    val seen = mutableListOf<Int>()
+    val returned = mutableListOf<Int>()
+    val error = AtomicReference<Throwable?>()
+    val dispatcher = CameraFrameDispatcher(
+      onFrame = { frame ->
+        val value = frame.data[0].toInt()
+        synchronized(seen) { seen += value }
+        if (value == 1) {
+          firstStarted.countDown()
+          check(releaseFirst.await(5, TimeUnit.SECONDS))
+        }
+        callbacks.countDown()
+      },
+      onError = error::set,
+      beforeFrameStart = {
+        if (frameStartCount.incrementAndGet() == 2) {
+          secondDequeued.countDown()
+          check(releaseSecondStart.await(5, TimeUnit.SECONDS))
+        }
+      },
+    )
+
+    try {
+      dispatcher.offerFrame(1, returned, buffersReturned)
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
+      dispatcher.offerFrame(2, returned, buffersReturned)
+      releaseFirst.countDown()
+      assertThat(secondDequeued.await(5, TimeUnit.SECONDS)).isTrue()
+
+      dispatcher.discardPending()
+      dispatcher.offerFrame(3, returned, buffersReturned)
+      releaseSecondStart.countDown()
+
+      assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(seen).containsExactly(1, 3).inOrder()
+      assertThat(returned).containsExactly(1, 2, 3)
+      assertThat(error.get()).isNull()
+    } finally {
+      releaseFirst.countDown()
+      releaseSecondStart.countDown()
+      dispatcher.close()
+    }
+  }
+
+  @Test
   fun analysisCoordinator_serializesRawCallbacksAcrossDispatchers() {
     val coordinator = CameraAnalysisCoordinator()
     val firstStarted = CountDownLatch(1)
