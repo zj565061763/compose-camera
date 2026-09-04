@@ -308,6 +308,7 @@ class CameraPreviewState internal constructor() {
     isMirrored: Boolean,
   ) {
     val current = _transformConfig.get()
+    if (current.previewSize == previewSize && current.contentScale == contentScale && current.isMirrored == isMirrored) return
     val geometry = calculatePreviewGeometry(
       bufferSize = current.bufferSize,
       rotationDegrees = current.rotationDegrees,

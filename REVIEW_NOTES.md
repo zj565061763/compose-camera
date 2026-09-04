@@ -103,7 +103,10 @@
 
 ## 测试与验证
 
-- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、截图像素与所有权、token 失效、尺寸选择、首帧与 session 对焦协调、单次对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发、线程 interrupt 隔离和异常安全清理。
+- `CameraPreviewStateTest.kt` 覆盖缩放矩阵、镜像、token 失效、会话状态和错误发布。
+- `CameraPreviewBitmapTest.kt` 与 `CameraPreviewParametersTest.kt` 覆盖截图像素与所有权、Bitmap 转换、尺寸选择和前后摄像头旋转。
+- `CameraPreviewAutoFocusTest.kt`、`CameraPreviewCleanupTest.kt` 与 `CameraPreviewRuntimeTest.kt` 覆盖首帧和 session 对焦协调、单次对焦调度、异常安全清理及工作线程复用。
+- `CameraFrameDispatcherTest.kt` 与 `PreviewSampledFrameDispatcherTest.kt` 覆盖 NV21 校验、原始帧与采样帧分发、缓冲区所有权、错误聚合和线程 interrupt 隔离。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、LifecycleOwner 交接、无活动 Controller 时的 Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。

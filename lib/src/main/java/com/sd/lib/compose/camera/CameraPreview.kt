@@ -295,11 +295,9 @@ private fun CameraPreviewTextureView(
   onTextureViewCreated: (TextureView) -> Unit,
   onSizeChanged: (IntSize) -> Unit,
 ) {
-  val previewResolution = state.previewResolution.value
   val previewTransformRevision = state.previewTransformRevision
   val textureTransform = remember(
     state,
-    previewResolution,
     previewTransformRevision,
     previewSize,
     contentScale,
