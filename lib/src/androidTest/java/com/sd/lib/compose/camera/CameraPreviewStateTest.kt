@@ -1429,6 +1429,53 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun frameDispatcher_closeAfterDequeueDiscardsFrameBeforeCallback() {
+    val firstStarted = CountDownLatch(1)
+    val releaseFirst = CountDownLatch(1)
+    val secondDequeued = CountDownLatch(1)
+    val releaseSecondStart = CountDownLatch(1)
+    val buffersReturned = CountDownLatch(2)
+    val frameStartCount = AtomicInteger()
+    val callbackCount = AtomicInteger()
+    val returned = mutableListOf<Int>()
+    val error = AtomicReference<Throwable?>()
+    val dispatcher = CameraFrameDispatcher(
+      onFrame = {
+        callbackCount.incrementAndGet()
+        firstStarted.countDown()
+        check(releaseFirst.await(5, TimeUnit.SECONDS))
+      },
+      onError = error::set,
+      beforeFrameStart = {
+        if (frameStartCount.incrementAndGet() == 2) {
+          secondDequeued.countDown()
+          check(releaseSecondStart.await(5, TimeUnit.SECONDS))
+        }
+      },
+    )
+
+    try {
+      dispatcher.offerFrame(1, returned, buffersReturned)
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
+      dispatcher.offerFrame(2, returned, buffersReturned)
+      releaseFirst.countDown()
+      assertThat(secondDequeued.await(5, TimeUnit.SECONDS)).isTrue()
+
+      dispatcher.close()
+      releaseSecondStart.countDown()
+
+      assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(callbackCount.get()).isEqualTo(1)
+      assertThat(returned).containsExactly(1, 2)
+      assertThat(error.get()).isNull()
+    } finally {
+      releaseFirst.countDown()
+      releaseSecondStart.countDown()
+      dispatcher.close()
+    }
+  }
+
+  @Test
   fun analysisCoordinator_serializesRawCallbacksAcrossDispatchers() {
     val coordinator = CameraAnalysisCoordinator()
     val firstStarted = CountDownLatch(1)

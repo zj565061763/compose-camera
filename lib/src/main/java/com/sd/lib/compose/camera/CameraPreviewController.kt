@@ -886,6 +886,7 @@ internal class CameraFrameDispatcher(
   private val onError: (Throwable) -> Unit,
   private val analysisCoordinator: CameraAnalysisCoordinator = CameraAnalysisCoordinator(),
   private val executor: ExecutorService = createCameraAnalysisExecutor(),
+  private val beforeFrameStart: (() -> Unit)? = null,
 ) : AutoCloseable {
   private val _lock = Any()
   private var _closed = false
@@ -929,15 +930,19 @@ internal class CameraFrameDispatcher(
   private fun process(frame: PendingCameraFrame) {
     var failure: Throwable? = null
     try {
-      onFrame(
-        CameraFrame.Preview(
-          data = frame.data,
-          width = frame.width,
-          height = frame.height,
-          rotationDegrees = frame.rotationDegrees,
-          transformIdentity = frame.transformIdentity,
-        ),
-      )
+      beforeFrameStart?.invoke()
+      // 与 close() 共用锁，将已出队帧的开始点线性化
+      if (synchronized(_lock) { !_closed }) {
+        onFrame(
+          CameraFrame.Preview(
+            data = frame.data,
+            width = frame.width,
+            height = frame.height,
+            rotationDegrees = frame.rotationDegrees,
+            transformIdentity = frame.transformIdentity,
+          ),
+        )
+      }
     } catch (error: Throwable) {
       failure = error
     } finally {
