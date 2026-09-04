@@ -811,9 +811,9 @@ internal class CameraAnalysisCoordinator : AutoCloseable {
     process: () -> Unit,
     discard: (Throwable?) -> Unit,
   ) {
-    val analysis = PendingCameraAnalysis(owner, process, discard)
+    val analysis = PendingCameraAnalysis(owner, execute, process, discard)
     var replaced: PendingCameraAnalysis? = null
-    var schedulingFailure: Throwable? = null
+    var toSchedule: PendingCameraAnalysis? = null
     synchronized(_lock) {
       if (_closed) {
         replaced = analysis
@@ -822,18 +822,11 @@ internal class CameraAnalysisCoordinator : AutoCloseable {
         _pending = analysis
       } else {
         _processing = true
-        _pending = analysis
-        try {
-          execute(Runnable(::drain))
-        } catch (error: Throwable) {
-          _processing = false
-          _pending = null
-          replaced = analysis
-          schedulingFailure = error
-        }
+        toSchedule = analysis
       }
     }
-    replaced?.also { dropped -> dropped.discard(schedulingFailure) }
+    replaced?.also { dropped -> dropped.discard(null) }
+    toSchedule?.also(::schedule)
   }
 
   fun discardPending(owner: Any) {
@@ -843,19 +836,60 @@ internal class CameraAnalysisCoordinator : AutoCloseable {
     pending?.also { analysis -> analysis.discard(null) }
   }
 
-  private fun drain() {
+  private fun schedule(initial: PendingCameraAnalysis) {
+    var analysis: PendingCameraAnalysis? = initial
+    var failure: Throwable? = null
+    while (analysis != null) {
+      val current = analysis
+      val schedulingFailure = try {
+        current.execute(Runnable { process(current) })
+        null
+      } catch (error: Throwable) {
+        error
+      }
+      if (schedulingFailure == null) break
+
+      try {
+        current.discard(schedulingFailure)
+      } catch (error: Throwable) {
+        failure = mergeFrameFailures(failure, error)
+      }
+      analysis = takeNext()
+    }
+    failure?.also { throw it }
+  }
+
+  private fun process(initial: PendingCameraAnalysis) {
+    var analysis = initial
+    var failure: Throwable? = null
     while (true) {
-      val analysis = synchronized(_lock) {
-        val next = _pending
-        _pending = null
-        if (next == null) _processing = false
-        next
-      } ?: return
       try {
         analysis.process()
-      } finally {
-        // 共享 drain 中的任务需要隔离用户回调留下的 interrupt 状态
-        Thread.interrupted()
+      } catch (error: Throwable) {
+        failure = mergeFrameFailures(failure, error)
+      }
+      // 共享协调中的任务需要隔离用户回调留下的 interrupt 状态
+      Thread.interrupted()
+
+      val next = takeNext() ?: break
+      if (failure != null || next.owner !== analysis.owner) {
+        try {
+          schedule(next)
+        } catch (error: Throwable) {
+          failure = mergeFrameFailures(failure, error)
+        }
+        break
+      }
+      analysis = next
+    }
+    failure?.also { throw it }
+  }
+
+  private fun takeNext(): PendingCameraAnalysis? {
+    return synchronized(_lock) {
+      _pending.also { next ->
+        _pending = null
+        if (next == null) _processing = false
       }
     }
   }
@@ -872,6 +906,7 @@ internal class CameraAnalysisCoordinator : AutoCloseable {
 
 private class PendingCameraAnalysis(
   val owner: Any,
+  val execute: (Runnable) -> Unit,
   val process: () -> Unit,
   val discard: (Throwable?) -> Unit,
 )
@@ -889,7 +924,7 @@ internal class CameraFrameDispatcher(
   private val beforeFrameStart: (() -> Unit)? = null,
 ) : AutoCloseable {
   private val _lock = Any()
-  private var _dispatchGeneration = 0L
+  private val _callbackStartGate = FrameCallbackStartGate()
   private var _closed = false
 
   fun offer(
@@ -915,14 +950,17 @@ internal class CameraFrameDispatcher(
           height = height,
           rotationDegrees = rotationDegrees,
           transformIdentity = transformIdentity,
-          dispatchGeneration = _dispatchGeneration,
+          callbackPermit = _callbackStartGate.register(),
           returnBuffer = returnBuffer,
         )
         analysisCoordinator.offer(
           owner = this,
           execute = executor::execute,
           process = { process(frame) },
-          discard = { failure -> reportOrThrow(releaseFrameBuffer(frame, failure)) },
+          discard = { failure ->
+            _callbackStartGate.cancel(frame.callbackPermit)
+            reportOrThrow(releaseFrameBuffer(frame, failure))
+          },
         )
       }
     }
@@ -933,21 +971,18 @@ internal class CameraFrameDispatcher(
     var failure: Throwable? = null
     try {
       beforeFrameStart?.invoke()
-      // 与关闭和会话停止共用锁，将已出队帧的开始点线性化
-      if (synchronized(_lock) { !_closed && frame.dispatchGeneration == _dispatchGeneration }) {
-        onFrame(
-          CameraFrame.Preview(
-            data = frame.data,
-            width = frame.width,
-            height = frame.height,
-            rotationDegrees = frame.rotationDegrees,
-            transformIdentity = frame.transformIdentity,
-          ),
-        )
-      }
+      val callbackFrame = CameraFrame.Preview(
+        data = frame.data,
+        width = frame.width,
+        height = frame.height,
+        rotationDegrees = frame.rotationDegrees,
+        transformIdentity = frame.transformIdentity,
+      )
+      _callbackStartGate.start(frame.callbackPermit) { onFrame(callbackFrame) }
     } catch (error: Throwable) {
       failure = error
     } finally {
+      _callbackStartGate.cancel(frame.callbackPermit)
       // 用户回调遗留的中断状态不能影响相机缓冲区归还
       Thread.interrupted()
       failure = releaseFrameBuffer(frame, failure)
@@ -957,7 +992,7 @@ internal class CameraFrameDispatcher(
 
   fun discardPending() {
     synchronized(_lock) {
-      _dispatchGeneration++
+      _callbackStartGate.invalidate()
       analysisCoordinator.discardPending(this)
     }
   }
@@ -967,6 +1002,7 @@ internal class CameraFrameDispatcher(
     synchronized(_lock) {
       if (!_closed) {
         _closed = true
+        _callbackStartGate.invalidate()
         shouldClose = true
       }
     }
@@ -995,6 +1031,7 @@ internal class PreviewSampledFrameDispatcher(
   private val executor: ExecutorService = createCameraAnalysisExecutor(),
 ) : AutoCloseable {
   private val _lock = Any()
+  private val _callbackStartGate = FrameCallbackStartGate()
   // coordinator 只调度票据，主线程截图开始时才取得这里的最新请求
   private val _pending = AtomicReference<PendingSampledFrame?>()
   private var _started = false
@@ -1021,11 +1058,13 @@ internal class PreviewSampledFrameDispatcher(
       val pending = PendingSampledFrame(sessionIdentity, isPreviewMirrored)
       _pending.set(pending)
       val runGeneration = _runGeneration
+      val callbackPermit = _callbackStartGate.register()
       analysisCoordinator.offer(
         owner = this,
         execute = executor::execute,
-        process = { process(runGeneration) },
+        process = { process(runGeneration, callbackPermit) },
         discard = { failure ->
+          _callbackStartGate.cancel(callbackPermit)
           _pending.compareAndSet(pending, null)
           reportFrameFailure(failure, onError)
         },
@@ -1033,28 +1072,32 @@ internal class PreviewSampledFrameDispatcher(
     }
   }
 
-  private fun process(runGeneration: Long) {
-    if (!hasPending(runGeneration)) return
-    val frame = try {
-      captureSampledFrameOnHandlerThread(mainHandler) {
-        takePending(runGeneration)?.let { pending ->
-          captureFrame(pending.sessionIdentity, pending.isPreviewMirrored)
-        }
-      }
-    } catch (error: Throwable) {
-      reportFrameFailure(error, onError)
-      return
-    } ?: return
-
-    var failure: Throwable? = null
+  private fun process(runGeneration: Long, callbackPermit: FrameCallbackPermit) {
     try {
-      if (isCurrent(runGeneration)) onFrame(frame)
-    } catch (error: Throwable) {
-      failure = error
+      if (!hasPending(runGeneration)) return
+      val frame = try {
+        captureSampledFrameOnHandlerThread(mainHandler) {
+          takePending(runGeneration)?.let { pending ->
+            captureFrame(pending.sessionIdentity, pending.isPreviewMirrored)
+          }
+        }
+      } catch (error: Throwable) {
+        reportFrameFailure(error, onError)
+        return
+      } ?: return
+
+      var failure: Throwable? = null
+      try {
+        _callbackStartGate.start(callbackPermit) { onFrame(frame) }
+      } catch (error: Throwable) {
+        failure = error
+      } finally {
+        failure = recycleSampledFrame(frame, failure)
+      }
+      reportFrameFailure(failure, onError)
     } finally {
-      failure = recycleSampledFrame(frame, failure)
+      _callbackStartGate.cancel(callbackPermit)
     }
-    reportFrameFailure(failure, onError)
   }
 
   private fun hasPending(runGeneration: Long): Boolean {
@@ -1069,18 +1112,13 @@ internal class PreviewSampledFrameDispatcher(
     }
   }
 
-  private fun isCurrent(runGeneration: Long): Boolean {
-    return synchronized(_lock) {
-      _started && !_closed && _runGeneration == runGeneration
-    }
-  }
-
   fun stop() {
     synchronized(_lock) {
       _started = false
       _pending.set(null)
+      _callbackStartGate.invalidate()
+      analysisCoordinator.discardPending(this)
     }
-    analysisCoordinator.discardPending(this)
   }
 
   override fun close() {
@@ -1090,6 +1128,7 @@ internal class PreviewSampledFrameDispatcher(
         _closed = true
         _started = false
         _pending.set(null)
+        _callbackStartGate.invalidate()
         shouldClose = true
       }
     }
@@ -1101,6 +1140,31 @@ internal class PreviewSampledFrameDispatcher(
     }
   }
 }
+
+/** 使回调开始与停止或关闭线性化，不等待已开始的用户回调。 */
+private class FrameCallbackStartGate {
+  private val _lock = Any()
+  private val _pending = mutableSetOf<FrameCallbackPermit>()
+
+  fun register(): FrameCallbackPermit {
+    return synchronized(_lock) { FrameCallbackPermit().also(_pending::add) }
+  }
+
+  fun start(permit: FrameCallbackPermit, action: () -> Unit) {
+    // 从 pending 移除是用户回调开始的线性化点
+    if (synchronized(_lock) { _pending.remove(permit) }) action()
+  }
+
+  fun cancel(permit: FrameCallbackPermit) {
+    synchronized(_lock) { _pending.remove(permit) }
+  }
+
+  fun invalidate() {
+    synchronized(_lock) { _pending.clear() }
+  }
+}
+
+private class FrameCallbackPermit
 
 internal fun returnStalePreviewCallbackBuffer(
   data: ByteArray?,
@@ -1194,8 +1258,9 @@ private fun <T> awaitHandlerTaskUninterruptibly(task: FutureTask<T>): T {
   }
 }
 
-private fun mergeFrameFailures(failure: Throwable, nextFailure: Throwable): Throwable {
+private fun mergeFrameFailures(failure: Throwable?, nextFailure: Throwable): Throwable {
   return when {
+    failure == null -> nextFailure
     failure is Error || nextFailure !is Error -> failure.also {
       if (failure !== nextFailure) failure.addSuppressed(nextFailure)
     }
@@ -1211,13 +1276,7 @@ private fun recycleSampledFrame(
     frame.data.recycle()
     failure
   } catch (recycleFailure: Throwable) {
-    when {
-      failure == null -> recycleFailure
-      failure is Error || recycleFailure !is Error -> failure.also {
-        if (failure !== recycleFailure) failure.addSuppressed(recycleFailure)
-      }
-      else -> recycleFailure.also { recycleFailure.addSuppressed(failure) }
-    }
+    mergeFrameFailures(failure, recycleFailure)
   }
 }
 
@@ -1234,13 +1293,7 @@ private fun releaseFrameBuffer(
     returnBuffer(data)
     failure
   } catch (returnFailure: Throwable) {
-    when {
-      failure == null -> returnFailure
-      failure is Error || returnFailure !is Error -> failure.also {
-        if (failure !== returnFailure) failure.addSuppressed(returnFailure)
-      }
-      else -> returnFailure.also { returnFailure.addSuppressed(failure) }
-    }
+    mergeFrameFailures(failure, returnFailure)
   }
 }
 
@@ -1268,7 +1321,7 @@ private data class PendingCameraFrame(
   val height: Int,
   val rotationDegrees: Int,
   val transformIdentity: CameraFrameTransformIdentity?,
-  val dispatchGeneration: Long,
+  val callbackPermit: FrameCallbackPermit,
   val returnBuffer: (ByteArray) -> Unit,
 )
 

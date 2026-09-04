@@ -1532,17 +1532,23 @@ class CameraPreviewStateTest {
   @Test
   fun analysisCoordinator_serializesRawCallbacksAcrossDispatchers() {
     val coordinator = CameraAnalysisCoordinator()
+    val firstExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "FirstAnalysis") }
+    val secondExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "SecondAnalysis") }
     val firstStarted = CountDownLatch(1)
     val releaseFirst = CountDownLatch(1)
     val secondStarted = CountDownLatch(1)
     val callbacks = CountDownLatch(2)
     val buffersReturned = CountDownLatch(3)
     val seen = mutableListOf<Int>()
+    val callbackThreads = mutableListOf<String>()
     val returned = mutableListOf<Int>()
     val error = AtomicReference<Throwable?>()
     val callback: (CameraFrame.Preview) -> Unit = { frame ->
       val value = frame.data[0].toInt()
-      synchronized(seen) { seen += value }
+      synchronized(seen) {
+        seen += value
+        callbackThreads += Thread.currentThread().name
+      }
       if (value == 1) {
         firstStarted.countDown()
         check(releaseFirst.await(5, TimeUnit.SECONDS))
@@ -1551,8 +1557,18 @@ class CameraPreviewStateTest {
       }
       callbacks.countDown()
     }
-    val firstDispatcher = CameraFrameDispatcher(callback, error::set, analysisCoordinator = coordinator)
-    val secondDispatcher = CameraFrameDispatcher(callback, error::set, analysisCoordinator = coordinator)
+    val firstDispatcher = CameraFrameDispatcher(
+      callback,
+      error::set,
+      analysisCoordinator = coordinator,
+      executor = firstExecutor,
+    )
+    val secondDispatcher = CameraFrameDispatcher(
+      callback,
+      error::set,
+      analysisCoordinator = coordinator,
+      executor = secondExecutor,
+    )
 
     try {
       firstDispatcher.offerFrame(1, returned, buffersReturned)
@@ -1568,7 +1584,9 @@ class CameraPreviewStateTest {
       assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(seen).containsExactly(1, 3).inOrder()
+      assertThat(callbackThreads).containsExactly("FirstAnalysis", "SecondAnalysis").inOrder()
       assertThat(returned).containsExactly(1, 2, 3)
+      assertThat(firstExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
       assertThat(error.get()).isNull()
     } finally {
       releaseFirst.countDown()
@@ -1581,11 +1599,14 @@ class CameraPreviewStateTest {
   @Test
   fun analysisCoordinator_serializesSampledCallbackAfterRawDispatcher() {
     val coordinator = CameraAnalysisCoordinator()
+    val rawExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "RawAnalysis") }
+    val sampledExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "SampledAnalysis") }
     val now = AtomicLong(1_000)
     val rawStarted = CountDownLatch(1)
     val releaseRaw = CountDownLatch(1)
     val rawBufferReturned = CountDownLatch(1)
     val sampledStarted = CountDownLatch(1)
+    val sampledThread = AtomicReference<String?>()
     val capturedIdentities = mutableListOf<CameraFrameTransformIdentity>()
     val returned = mutableListOf<Int>()
     val error = AtomicReference<Throwable?>()
@@ -1597,6 +1618,7 @@ class CameraPreviewStateTest {
       },
       onError = error::set,
       analysisCoordinator = coordinator,
+      executor = rawExecutor,
     )
     val sampledDispatcher = PreviewSampledFrameDispatcher(
       mainHandler = Handler(Looper.getMainLooper()),
@@ -1609,10 +1631,14 @@ class CameraPreviewStateTest {
           transformIdentity = identity,
         )
       },
-      onFrame = { sampledStarted.countDown() },
+      onFrame = {
+        sampledThread.set(Thread.currentThread().name)
+        sampledStarted.countDown()
+      },
       onError = error::set,
       elapsedRealtimeMillis = now::get,
       analysisCoordinator = coordinator,
+      executor = sampledExecutor,
     )
 
     try {
@@ -1634,11 +1660,61 @@ class CameraPreviewStateTest {
       assertThat(sampledStarted.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(rawBufferReturned.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(capturedIdentities).containsExactly(latestIdentity)
+      assertThat(sampledThread.get()).isEqualTo("SampledAnalysis")
+      assertThat(rawExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
       assertThat(error.get()).isNull()
     } finally {
       releaseRaw.countDown()
       rawDispatcher.close()
       sampledDispatcher.close()
+      coordinator.close()
+    }
+  }
+
+  @Test
+  fun analysisCoordinator_handoffRejectionReturnsFrameAndStopsOldExecutor() {
+    val coordinator = CameraAnalysisCoordinator()
+    val firstExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "FirstAnalysis") }
+    val rejectedExecutor = Executors.newSingleThreadExecutor().also { it.shutdown() }
+    val firstStarted = CountDownLatch(1)
+    val releaseFirst = CountDownLatch(1)
+    val buffersReturned = CountDownLatch(2)
+    val callbackCount = AtomicInteger()
+    val receivedError = AtomicReference<Throwable?>()
+    val returned = mutableListOf<Int>()
+    val firstDispatcher = CameraFrameDispatcher(
+      onFrame = {
+        callbackCount.incrementAndGet()
+        firstStarted.countDown()
+        check(releaseFirst.await(5, TimeUnit.SECONDS))
+      },
+      onError = receivedError::set,
+      analysisCoordinator = coordinator,
+      executor = firstExecutor,
+    )
+    val rejectedDispatcher = CameraFrameDispatcher(
+      onFrame = { callbackCount.incrementAndGet() },
+      onError = receivedError::set,
+      analysisCoordinator = coordinator,
+      executor = rejectedExecutor,
+    )
+
+    try {
+      firstDispatcher.offerFrame(1, returned, buffersReturned)
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
+      firstDispatcher.close()
+      rejectedDispatcher.offerFrame(2, returned, buffersReturned)
+      releaseFirst.countDown()
+
+      assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(firstExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(callbackCount.get()).isEqualTo(1)
+      assertThat(returned).containsExactly(1, 2)
+      assertThat(receivedError.get()).isInstanceOf(RejectedExecutionException::class.java)
+    } finally {
+      releaseFirst.countDown()
+      firstDispatcher.close()
+      rejectedDispatcher.close()
       coordinator.close()
     }
   }
