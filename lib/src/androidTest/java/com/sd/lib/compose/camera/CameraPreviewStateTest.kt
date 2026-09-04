@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.view.Surface
 import androidx.compose.ui.layout.ContentScale
@@ -1453,6 +1454,7 @@ class CameraPreviewStateTest {
       onFrame = {
         rawStarted.countDown()
         check(releaseRaw.await(5, TimeUnit.SECONDS))
+        Thread.currentThread().interrupt()
       },
       onError = error::set,
       analysisCoordinator = coordinator,
@@ -1682,6 +1684,231 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun sampledFrameDispatcher_interruptWhileCaptureQueuedCancelsCapture() {
+    val captureThread = HandlerThread("CameraPreview-CaptureTest").also { it.start() }
+    val captureHandler = Handler(captureThread.looper)
+    val handlerBlocked = CountDownLatch(1)
+    val releaseHandler = CountDownLatch(1)
+    val handlerDrained = CountDownLatch(1)
+    val analysisThread = AtomicReference<Thread?>()
+    val executor = Executors.newSingleThreadExecutor { runnable ->
+      Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME).also(analysisThread::set)
+    }
+    val now = AtomicLong(1_000)
+    val captureCount = AtomicInteger()
+    val callbackCount = AtomicInteger()
+    val receivedError = AtomicReference<Throwable?>()
+    val errorReceived = CountDownLatch(1)
+    check(
+      captureHandler.post {
+        handlerBlocked.countDown()
+        check(releaseHandler.await(5, TimeUnit.SECONDS))
+      },
+    )
+    assertThat(handlerBlocked.await(5, TimeUnit.SECONDS)).isTrue()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = captureHandler,
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        captureCount.incrementAndGet()
+        CameraFrame.PreviewSampled(
+          data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+          rotationDegrees = 0,
+          transformIdentity = identity,
+        )
+      },
+      onFrame = { callbackCount.incrementAndGet() },
+      onError = { error ->
+        receivedError.set(error)
+        errorReceived.countDown()
+      },
+      elapsedRealtimeMillis = now::get,
+      executor = executor,
+    )
+
+    try {
+      dispatcher.start()
+      now.set(1_100)
+      dispatcher.offer(CameraFrameTransformIdentity(), isPreviewMirrored = false)
+      val worker = checkNotNull(analysisThread.get())
+      assertThat(awaitThreadState(worker, Thread.State.WAITING, 5_000)).isTrue()
+
+      worker.interrupt()
+
+      assertThat(errorReceived.await(5, TimeUnit.SECONDS)).isTrue()
+      releaseHandler.countDown()
+      check(captureHandler.post { handlerDrained.countDown() })
+      assertThat(handlerDrained.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(captureCount.get()).isEqualTo(0)
+      assertThat(callbackCount.get()).isEqualTo(0)
+      assertThat(receivedError.get()).isInstanceOf(InterruptedException::class.java)
+    } finally {
+      releaseHandler.countDown()
+      dispatcher.close()
+      captureThread.quitSafely()
+      captureThread.join(5_000)
+    }
+  }
+
+  @Test
+  fun sampledFrameDispatcher_interruptDuringCaptureRecyclesLateBitmapAndContinues() {
+    val captureThread = HandlerThread("CameraPreview-CaptureTest").also { it.start() }
+    val captureHandler = Handler(captureThread.looper)
+    val analysisThread = AtomicReference<Thread?>()
+    val executor = Executors.newSingleThreadExecutor { runnable ->
+      Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME).also(analysisThread::set)
+    }
+    val now = AtomicLong(1_000)
+    val firstIdentity = CameraFrameTransformIdentity()
+    val interruptedIdentity = CameraFrameTransformIdentity()
+    val latestIdentity = CameraFrameTransformIdentity()
+    val firstCallback = CountDownLatch(1)
+    val interruptedCaptureStarted = CountDownLatch(1)
+    val releaseInterruptedCapture = CountDownLatch(1)
+    val latestCallback = CountDownLatch(1)
+    val errorReceived = CountDownLatch(1)
+    val callbackCount = AtomicInteger()
+    val errorCount = AtomicInteger()
+    val interruptedBitmap = AtomicReference<Bitmap?>()
+    val receivedError = AtomicReference<Throwable?>()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = captureHandler,
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        if (identity === interruptedIdentity) {
+          interruptedBitmap.set(bitmap)
+          interruptedCaptureStarted.countDown()
+          check(releaseInterruptedCapture.await(5, TimeUnit.SECONDS))
+        }
+        CameraFrame.PreviewSampled(
+          data = bitmap,
+          rotationDegrees = 0,
+          transformIdentity = identity,
+        )
+      },
+      onFrame = { frame ->
+        callbackCount.incrementAndGet()
+        when {
+          frame.transformToken.matches(firstIdentity) -> firstCallback.countDown()
+          frame.transformToken.matches(latestIdentity) -> latestCallback.countDown()
+        }
+      },
+      onError = { error ->
+        receivedError.set(error)
+        errorCount.incrementAndGet()
+        errorReceived.countDown()
+      },
+      elapsedRealtimeMillis = now::get,
+      executor = executor,
+    )
+
+    try {
+      dispatcher.start()
+      now.set(1_100)
+      dispatcher.offer(firstIdentity, isPreviewMirrored = false)
+      assertThat(firstCallback.await(5, TimeUnit.SECONDS)).isTrue()
+
+      now.set(1_200)
+      dispatcher.offer(interruptedIdentity, isPreviewMirrored = false)
+      assertThat(interruptedCaptureStarted.await(5, TimeUnit.SECONDS)).isTrue()
+      now.set(1_300)
+      dispatcher.offer(latestIdentity, isPreviewMirrored = false)
+
+      checkNotNull(analysisThread.get()).interrupt()
+      releaseInterruptedCapture.countDown()
+
+      assertThat(errorReceived.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(latestCallback.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(checkNotNull(interruptedBitmap.get()).isRecycled).isTrue()
+      assertThat(receivedError.get()).isInstanceOf(InterruptedException::class.java)
+      assertThat(errorCount.get()).isEqualTo(1)
+      assertThat(callbackCount.get()).isEqualTo(2)
+    } finally {
+      releaseInterruptedCapture.countDown()
+      dispatcher.close()
+      captureThread.quitSafely()
+      captureThread.join(5_000)
+    }
+  }
+
+  @Test
+  fun sampledFrameDispatcher_mainQueueDelayCapturesOnlyLatestRequest() {
+    val captureThread = HandlerThread("CameraPreview-CaptureTest").also { it.start() }
+    val captureHandler = Handler(captureThread.looper)
+    val handlerBlocked = CountDownLatch(1)
+    val releaseHandler = CountDownLatch(1)
+    val analysisThread = AtomicReference<Thread?>()
+    val executor = Executors.newSingleThreadExecutor { runnable ->
+      Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME).also(analysisThread::set)
+    }
+    val now = AtomicLong(1_000)
+    val firstIdentity = CameraFrameTransformIdentity()
+    val replacedIdentity = CameraFrameTransformIdentity()
+    val latestIdentity = CameraFrameTransformIdentity()
+    val capturedIdentities = mutableListOf<CameraFrameTransformIdentity>()
+    val callbackCount = AtomicInteger()
+    val latestCallback = AtomicBoolean()
+    val callbackReceived = CountDownLatch(1)
+    val analysisDrained = CountDownLatch(1)
+    val error = AtomicReference<Throwable?>()
+    check(
+      captureHandler.post {
+        handlerBlocked.countDown()
+        check(releaseHandler.await(5, TimeUnit.SECONDS))
+      },
+    )
+    assertThat(handlerBlocked.await(5, TimeUnit.SECONDS)).isTrue()
+    val dispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = captureHandler,
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        synchronized(capturedIdentities) { capturedIdentities += identity }
+        CameraFrame.PreviewSampled(
+          data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+          rotationDegrees = 0,
+          transformIdentity = identity,
+        )
+      },
+      onFrame = { frame ->
+        callbackCount.incrementAndGet()
+        latestCallback.set(frame.transformToken.matches(latestIdentity))
+        callbackReceived.countDown()
+      },
+      onError = error::set,
+      elapsedRealtimeMillis = now::get,
+      executor = executor,
+    )
+
+    try {
+      dispatcher.start()
+      now.set(1_100)
+      dispatcher.offer(firstIdentity, isPreviewMirrored = false)
+      val worker = checkNotNull(analysisThread.get())
+      assertThat(awaitThreadState(worker, Thread.State.WAITING, 5_000)).isTrue()
+
+      now.set(1_200)
+      dispatcher.offer(replacedIdentity, isPreviewMirrored = false)
+      now.set(1_300)
+      dispatcher.offer(latestIdentity, isPreviewMirrored = false)
+      releaseHandler.countDown()
+
+      assertThat(callbackReceived.await(5, TimeUnit.SECONDS)).isTrue()
+      executor.execute { analysisDrained.countDown() }
+      assertThat(analysisDrained.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(capturedIdentities).containsExactly(latestIdentity)
+      assertThat(callbackCount.get()).isEqualTo(1)
+      assertThat(latestCallback.get()).isTrue()
+      assertThat(error.get()).isNull()
+    } finally {
+      releaseHandler.countDown()
+      dispatcher.close()
+      captureThread.quitSafely()
+      captureThread.join(5_000)
+    }
+  }
+
+  @Test
   fun sampledFrameDispatcher_keepsOnlyLatestPendingCapture() {
     val now = AtomicLong(1_000)
     val firstCallbackStarted = CountDownLatch(1)
@@ -1893,6 +2120,15 @@ private fun cameraInfo(facing: Int, orientation: Int): Camera.CameraInfo {
 
 private fun runOnMainSync(action: () -> Unit) {
   InstrumentationRegistry.getInstrumentation().runOnMainSync(action)
+}
+
+private fun awaitThreadState(thread: Thread, state: Thread.State, timeoutMillis: Long): Boolean {
+  val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+  while (System.nanoTime() < deadline) {
+    if (thread.state == state) return true
+    Thread.yield()
+  }
+  return thread.state == state
 }
 
 private fun frame(

@@ -16,13 +16,14 @@ import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import java.util.WeakHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import java.util.WeakHashMap
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 
 /** 管理一次 [CameraPreview] 会话和帧分发 */
@@ -850,7 +851,12 @@ internal class CameraAnalysisCoordinator : AutoCloseable {
         if (next == null) _processing = false
         next
       } ?: return
-      analysis.process()
+      try {
+        analysis.process()
+      } finally {
+        // 共享 drain 中的任务需要隔离用户回调留下的 interrupt 状态
+        Thread.interrupted()
+      }
     }
   }
 
@@ -977,6 +983,8 @@ internal class PreviewSampledFrameDispatcher(
   private val executor: ExecutorService = createCameraAnalysisExecutor(),
 ) : AutoCloseable {
   private val _lock = Any()
+  // coordinator 只调度票据，主线程截图开始时才取得这里的最新请求
+  private val _pending = AtomicReference<PendingSampledFrame?>()
   private var _started = false
   private var _closed = false
   private var _lastSampleTimeMillis = 0L
@@ -999,23 +1007,26 @@ internal class PreviewSampledFrameDispatcher(
       if (currentIntervalMillis <= 0 || now - _lastSampleTimeMillis < currentIntervalMillis) return
       _lastSampleTimeMillis = now
       val pending = PendingSampledFrame(sessionIdentity, isPreviewMirrored)
+      _pending.set(pending)
       val runGeneration = _runGeneration
       analysisCoordinator.offer(
         owner = this,
         execute = executor::execute,
-        process = { process(pending, runGeneration) },
-        discard = { failure -> reportFrameFailure(failure, onError) },
+        process = { process(runGeneration) },
+        discard = { failure ->
+          _pending.compareAndSet(pending, null)
+          reportFrameFailure(failure, onError)
+        },
       )
     }
   }
 
-  private fun process(pending: PendingSampledFrame, runGeneration: Long) {
+  private fun process(runGeneration: Long) {
+    if (!hasPending(runGeneration)) return
     val frame = try {
-      callOnHandlerThread(mainHandler) {
-        if (isCurrent(runGeneration)) {
+      captureSampledFrameOnHandlerThread(mainHandler) {
+        takePending(runGeneration)?.let { pending ->
           captureFrame(pending.sessionIdentity, pending.isPreviewMirrored)
-        } else {
-          null
         }
       }
     } catch (error: Throwable) {
@@ -1034,6 +1045,18 @@ internal class PreviewSampledFrameDispatcher(
     reportFrameFailure(failure, onError)
   }
 
+  private fun hasPending(runGeneration: Long): Boolean {
+    return synchronized(_lock) {
+      _started && !_closed && _runGeneration == runGeneration && _pending.get() != null
+    }
+  }
+
+  private fun takePending(runGeneration: Long): PendingSampledFrame? {
+    return synchronized(_lock) {
+      if (_started && !_closed && _runGeneration == runGeneration) _pending.getAndSet(null) else null
+    }
+  }
+
   private fun isCurrent(runGeneration: Long): Boolean {
     return synchronized(_lock) {
       _started && !_closed && _runGeneration == runGeneration
@@ -1041,7 +1064,10 @@ internal class PreviewSampledFrameDispatcher(
   }
 
   fun stop() {
-    synchronized(_lock) { _started = false }
+    synchronized(_lock) {
+      _started = false
+      _pending.set(null)
+    }
     analysisCoordinator.discardPending(this)
   }
 
@@ -1051,6 +1077,7 @@ internal class PreviewSampledFrameDispatcher(
       if (!_closed) {
         _closed = true
         _started = false
+        _pending.set(null)
         shouldClose = true
       }
     }
@@ -1078,6 +1105,89 @@ private fun reportFrameFailure(failure: Throwable?, onError: (Throwable) -> Unit
     null -> Unit
     is Exception -> onError(failure)
     else -> throw failure
+  }
+}
+
+/** 中断时取消未执行的截图；已经执行时等待并回收结果。 */
+private fun captureSampledFrameOnHandlerThread(
+  handler: Handler,
+  captureFrame: () -> CameraFrame.PreviewSampled?,
+): CameraFrame.PreviewSampled? {
+  if (Looper.myLooper() === handler.looper) return captureFrame()
+  val task = CancellableHandlerFutureTask(captureFrame)
+  check(handler.post(task)) { "The target handler thread is not available." }
+  return try {
+    task.get()
+  } catch (error: ExecutionException) {
+    throw error.cause ?: error
+  } catch (error: InterruptedException) {
+    var failure: Throwable = error
+    try {
+      if (task.cancelBeforeStart()) {
+        handler.removeCallbacks(task)
+      } else {
+        awaitHandlerTaskUninterruptibly(task)?.also { frame ->
+          failure = recycleSampledFrame(frame, failure) ?: failure
+        }
+      }
+    } catch (cleanupFailure: Throwable) {
+      failure = mergeFrameFailures(failure, cleanupFailure)
+    } finally {
+      Thread.currentThread().interrupt()
+    }
+    throw failure
+  }
+}
+
+/** 只允许在 action 开始前取消，避免丢失执行中的结果。 */
+private class CancellableHandlerFutureTask<T>(action: () -> T) : FutureTask<T>(action) {
+  private val _startLock = Any()
+  private var _started = false
+  private var _cancelledBeforeStart = false
+
+  override fun run() {
+    val shouldRun = synchronized(_startLock) {
+      if (_cancelledBeforeStart) {
+        false
+      } else {
+        _started = true
+        true
+      }
+    }
+    if (shouldRun) super.run()
+  }
+
+  fun cancelBeforeStart(): Boolean {
+    return synchronized(_startLock) {
+      if (_started) {
+        false
+      } else {
+        cancel(false).also { cancelled ->
+          if (cancelled) _cancelledBeforeStart = true
+        }
+      }
+    }
+  }
+}
+
+private fun <T> awaitHandlerTaskUninterruptibly(task: FutureTask<T>): T {
+  while (true) {
+    try {
+      return task.get()
+    } catch (_: InterruptedException) {
+      // 完成结果所有权交接后再统一恢复 interrupt 状态
+    } catch (error: ExecutionException) {
+      throw error.cause ?: error
+    }
+  }
+}
+
+private fun mergeFrameFailures(failure: Throwable, nextFailure: Throwable): Throwable {
+  return when {
+    failure is Error || nextFailure !is Error -> failure.also {
+      if (failure !== nextFailure) failure.addSuppressed(nextFailure)
+    }
+    else -> nextFailure.also { nextFailure.addSuppressed(failure) }
   }
 }
 

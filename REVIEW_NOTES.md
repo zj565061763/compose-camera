@@ -76,6 +76,8 @@
 - 单个正在组合的 `CameraPreview` 必须在连续 Controller generation 间共享分析串行协调器；旧回调完成前，新 generation 的原始帧和采样帧只能合并保留最新待处理任务，禁止并发进入用户回调。
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
+- `PreviewSampled` 请求在主线程真正开始截图前始终可以被更新请求替换；分析协调器提前取出调度任务不能固化待截图请求。
+- 用户回调保留的线程 interrupt 状态不得污染后续分析任务；采样截图等待被中断时，尚未开始的主线程任务必须取消，已经开始的任务结果必须显式回收。
 - `Camera.PreviewCallback` 返回 `null` 缓冲区时必须报告 `CAMERA_RUNTIME_ERROR` 并停止当前会话，禁止让空值异常逃逸相机线程。
 - `TextureView.getBitmap()` 不会把 `setTransform()` 的内容矩阵烘入 Bitmap。`PreviewSampled` 和 `takeScreenshot()` 必须按当前 geometry 的内容比例截图，再显式绘制到浮点 content bounds 完成偏移和裁剪，禁止依赖平台 readback 应用显示矩阵。
 - 截图源按统一比例限制在旋转后的相机缓冲区尺寸以内，避免为已经被相机缓冲区限制的内容创建超大 Bitmap；geometry 为 identity 且不需要移除平台镜像时直接转交截图 Bitmap，禁止无条件复制第二张预览尺寸 Bitmap。
