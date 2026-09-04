@@ -1247,6 +1247,26 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun clearSession_onlyClearsCurrentSession() {
+    val state = CameraPreviewState()
+    val currentSessionIdentity = CameraFrameTransformIdentity()
+    state.startSession(
+      sessionIdentity = currentSessionIdentity,
+      bufferSize = IntSize(640, 480),
+      rotationDegrees = 0,
+      isMirrored = false,
+    )
+
+    assertThat(state.clearSession(CameraFrameTransformIdentity())).isFalse()
+    assertThat(state.currentSessionIdentity()).isSameInstanceAs(currentSessionIdentity)
+    assertThat(state.previewResolution.value).isEqualTo(IntSize(640, 480))
+
+    assertThat(state.clearSession(currentSessionIdentity)).isTrue()
+    assertThat(state.currentSessionIdentity()).isNull()
+    assertThat(state.previewResolution.value).isEqualTo(IntSize.Zero)
+  }
+
+  @Test
   fun failureAfterSessionStartIsNotClearedByFirstFrame() {
     val state = CameraPreviewState()
     val attemptIdentity = CameraPreviewAttemptIdentity()
@@ -1394,6 +1414,19 @@ class CameraPreviewStateTest {
     assertThat(bitmap.width).isEqualTo(width)
     assertThat(bitmap.height).isEqualTo(height)
     bitmap.recycle()
+  }
+
+  @Test
+  fun cameraFrame_toBitmapReturnsNullForInvalidFrame() {
+    val invalidFrame = frame(
+      identity = CameraFrameTransformIdentity(),
+      width = 0,
+      height = 0,
+      rotationDegrees = 0,
+      data = ByteArray(0),
+    )
+
+    assertThat(invalidFrame.toBitmap()).isNull()
   }
 
   @Test

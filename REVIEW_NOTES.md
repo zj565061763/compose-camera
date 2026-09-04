@@ -1,6 +1,6 @@
 # Camera Library Review Notes
 
-本文记录截至 2026-09-04 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
+本文记录截至 2026-09-05 已确认的实现约束。修改 `lib` 前应先阅读本文件，避免重新引入生命周期、坐标、帧缓冲区和资源释放问题。
 
 ## 产品边界
 
@@ -52,14 +52,14 @@
 - `CameraPreviewState.requestFocus()` 的对焦入口只在对应 Controller 组合期间有效，Controller 替换或退出组合后必须按入口身份解除，旧 Controller 不得清除或接收新会话的请求。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
 - 单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用同一个 `CameraPreview-Camera` 专用线程，旧 generation 的停止与新 generation 的启动按提交顺序执行。
-- Controller 在相机线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作，只释放自己打开的相机；`CameraPreview` 退出组合或 Lifecycle 销毁且所有 Controller 清理完成后，runtime 才关闭自己创建的工作线程，不得影响进程内其他相机使用方。
+- Controller 在相机线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作，只释放自己打开的相机；Runtime 由 `CameraPreview` 外层直接监听 Lifecycle 销毁，确保没有活动 Controller 时也能关闭。`CameraPreview` 退出组合或 Lifecycle 销毁且所有 Controller 清理完成后，runtime 才关闭自己创建的工作线程，不得影响进程内其他相机使用方。
 - 打开、配置或运行错误会停止当前会话；外部条件恢复后可以调用 `CameraPreviewState.retry()`。
 
 ## 预览尺寸、旋转与镜像
 
 - Controller 优先从不超过 `1280 × 960` 像素且面积不低于最大候选四分之一的预览尺寸中，选择旋转后最接近 Compose 区域比例的尺寸；若设备没有符合上限的尺寸，则选择像素面积最小的尺寸，避免为比例匹配分配过大的相机和 NV21 缓冲区。
 - 普通布局变化只更新最新有效尺寸，不立即重建当前会话；Lifecycle 或 Surface 后续自然重开时必须按最新尺寸重新选择预览分辨率。
-- 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用任一帧处理模式且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
+- 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用原始帧处理且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
 - `TextureView` 保持 Compose 预览区域尺寸，并通过内容变换矩阵应用旋转后的原始帧比例和 `ContentScale`，避免 AndroidView 互操作层把相机缓冲区直接拉伸到预览区域。
 - 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
 - 平台默认镜像前置预览。额外水平翻转合并到 `TextureView` 内容矩阵，只用于补偿平台默认状态与 `CameraMirrorMode` 目标状态的差异。
@@ -73,11 +73,11 @@
 
 ## 帧线程与缓冲区
 
-- 只有 `frameProcessor` 不是 `None` 时才创建三个 NV21 回调缓冲区；名为 `CameraPreview-Analysis` 的单线程 executor 在首个分析任务到达时懒创建，并由单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用。
+- 只有使用原始 `Preview` 帧处理时才创建三个 NV21 回调缓冲区；名为 `CameraPreview-Analysis` 的单线程 executor 在首个分析任务到达时懒创建，并由单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用。
 - 原始帧和采样帧共享分析串行协调器；旧回调完成前，新 generation 只能合并保留最新待处理任务，禁止并发进入用户回调。
 - 回调任务在 generation 有效性检查处取得执行权；会话停止或 dispatcher 关闭会使尚未取得执行权的任务失效，但不等待已经取得执行权的同步回调。
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
-- `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
+- `PreviewSampled` 使用当前会话的 `onSurfaceTextureUpdated` 作为采样节拍，不注册相机帧回调；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
 - `PreviewSampled` 请求在主线程真正开始截图前始终可以被更新请求替换；分析协调器提前取出调度任务不能固化待截图请求。
 - 用户回调保留的线程 interrupt 状态必须在回调返回后、归还相机缓冲区前清除，不得污染缓冲区归还或后续分析任务；采样截图等待被中断时，尚未开始的主线程任务必须取消，已经开始的任务结果必须显式回收。
 - `Camera.PreviewCallback` 返回 `null` 缓冲区时必须报告 `CAMERA_RUNTIME_ERROR` 并停止当前会话，禁止让空值异常逃逸相机线程。
@@ -105,7 +105,7 @@
 
 - `CameraPreviewStateTest.kt` 覆盖缩放矩阵、前后摄像头旋转、镜像、截图像素与所有权、token 失效、尺寸选择、首帧与 session 对焦协调、单次对焦调度、NV21 校验、Bitmap 转换、原始帧与采样帧分发、线程 interrupt 隔离和异常安全清理。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。
+- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、LifecycleOwner 交接、无活动 Controller 时的 Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - 仪器测试 APK 的 targetSdk 与 compileSdk 保持一致，避免只覆盖旧版兼容行为。
 - 异步测试使用有超时的等待，禁止固定 `sleep`；优先使用轻量 Fake、Google Truth 和显式 `AndroidJUnit4`。

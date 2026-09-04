@@ -32,8 +32,12 @@ sealed interface CameraFrame {
 
     /** 把当前帧转换为独立的未旋转 Bitmap，转换失败时返回 `null`。 */
     fun toBitmap(): Bitmap? {
-      val imageData = nv21ToJpeg(data, width, height) ?: return null
-      return BitmapFactory.decodeByteArray(imageData, 0, imageData.size)
+      return try {
+        val imageData = nv21ToJpeg(data, width, height) ?: return null
+        BitmapFactory.decodeByteArray(imageData, 0, imageData.size)
+      } catch (_: Exception) {
+        null
+      }
     }
   }
 

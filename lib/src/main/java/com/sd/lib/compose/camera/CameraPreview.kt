@@ -27,6 +27,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.atomic.AtomicReference
 
@@ -68,6 +70,9 @@ fun CameraPreview(
   val currentMirrorMode by rememberUpdatedState(mirrorMode)
   val errorDispatcher = remember { MainThreadErrorDispatcher { error -> currentOnError(error) } }
   val runtime = remember(lifecycleOwner) { CameraPreviewRuntime() }
+  var isLifecycleDestroyed by remember(lifecycleOwner) {
+    mutableStateOf(lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED)
+  }
   val frameProcessorMode = frameProcessor.mode
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
   // 布局变化不重建 Controller，发布最新有效尺寸供下次开会话读取
@@ -96,8 +101,22 @@ fun CameraPreview(
     onDispose { state.reset() }
   }
 
-  DisposableEffect(runtime) {
-    onDispose { runtime.close() }
+  DisposableEffect(runtime, lifecycleOwner) {
+    val observer = LifecycleEventObserver { _, event ->
+      if (event == Lifecycle.Event.ON_DESTROY) {
+        isLifecycleDestroyed = true
+        runtime.close()
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
+      isLifecycleDestroyed = true
+      runtime.close()
+    }
+    onDispose {
+      lifecycleOwner.lifecycle.removeObserver(observer)
+      runtime.close()
+    }
   }
 
   val currentTextureView = textureView
@@ -160,9 +179,10 @@ fun CameraPreview(
   DisposableEffect(
     currentTextureView,
     hasValidPreviewSize,
+    isLifecycleDestroyed,
     attemptIdentity,
   ) {
-    if (currentTextureView == null || !hasValidPreviewSize || !hasLoadedCameraDevices) {
+    if (currentTextureView == null || !hasValidPreviewSize || !hasLoadedCameraDevices || isLifecycleDestroyed) {
       onDispose { }
     } else {
       val failureSubscription = MainThreadErrorSubscription(failureDispatcher)
@@ -214,8 +234,7 @@ fun CameraPreview(
         onSessionFailure = failureSubscription::dispatch,
         onError = errorDispatcher::dispatch,
         onSessionClosed = { sessionIdentity ->
-          activePreviewMirrored = null
-          state.clearSession(sessionIdentity)
+          if (state.clearSession(sessionIdentity)) activePreviewMirrored = null
         },
         autoFocusOperationsFactory = autoFocusOperationsFactory,
       )

@@ -962,6 +962,52 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
+  fun lifecycleOwnerChange_reopensSessionWithoutCameraOpenFailure() {
+    assumeCameraAvailable()
+    val initialCameraThreads = activeCameraThreads()
+    val initialLifecycleOwner = FakeLifecycleOwner()
+    val lifecycleOwner = mutableStateOf(initialLifecycleOwner)
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+    _composeRule.runOnUiThread { initialLifecycleOwner.start() }
+
+    _composeRule.setContent {
+      CompositionLocalProvider(LocalLifecycleOwner provides lifecycleOwner.value) {
+        CameraPreview(
+          modifier = Modifier.size(240.dp),
+          state = state,
+          onError = { failure -> error.compareAndSet(null, failure) },
+        )
+      }
+    }
+    waitForPreview(state, error)
+    var previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
+
+    repeat(5) {
+      val nextLifecycleOwner = FakeLifecycleOwner()
+      _composeRule.runOnUiThread {
+        nextLifecycleOwner.start()
+        lifecycleOwner.value = nextLifecycleOwner
+      }
+      _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+        val currentSessionIdentity = state.currentSessionIdentity()
+        error.get() != null || (
+          currentSessionIdentity != null &&
+            currentSessionIdentity !== previousSessionIdentity &&
+            state.createCurrentTextureViewTransform(currentSessionIdentity) != null
+        )
+      }
+      previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
+    }
+
+    assertThat(error.get()).isNull()
+    assertThat(state.previewResolution.value).isNotEqualTo(IntSize.Zero)
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      (activeCameraThreads() - initialCameraThreads).size == 1
+    }
+  }
+
+  @Test
   fun surfaceDestroyed_transfersReleaseToCameraThread() {
     val initialCameraThreads = activeCameraThreads()
     val lifecycleOwner = FakeLifecycleOwner()
@@ -1088,6 +1134,46 @@ class CameraPreviewIntegrationTest {
 
     assertThat(error.get()).isNull()
     assertThat(state.previewResolution.value).isEqualTo(IntSize.Zero)
+  }
+
+  @Test
+  fun destroyedLifecycleOwner_afterControllerLeavesForZeroSize_releasesWorkerThreads() {
+    assumeCameraAvailable()
+    val initialCameraThreads = activeCameraThreads()
+    val initialAnalysisThreads = activeAnalysisThreads()
+    val lifecycleOwner = FakeLifecycleOwner()
+    val hasPreviewSize = mutableStateOf(true)
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+    val frameReceived = CountDownLatch(1)
+    _composeRule.runOnUiThread { lifecycleOwner.start() }
+
+    _composeRule.setContent {
+      CompositionLocalProvider(LocalLifecycleOwner provides lifecycleOwner) {
+        CameraPreview(
+          modifier = Modifier.size(if (hasPreviewSize.value) 240.dp else 0.dp),
+          state = state,
+          onError = error::set,
+          frameProcessor = FrameProcessor.Preview { frameReceived.countDown() },
+        )
+      }
+    }
+
+    assertThat(frameReceived.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    _composeRule.runOnIdle { hasPreviewSize.value = false }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      state.previewResolution.value == IntSize.Zero
+    }
+    assertThat(activeCameraThreads() - initialCameraThreads).isNotEmpty()
+    assertThat(activeAnalysisThreads() - initialAnalysisThreads).isNotEmpty()
+
+    _composeRule.runOnUiThread { lifecycleOwner.destroy() }
+    _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
+      (activeCameraThreads() - initialCameraThreads).isEmpty() &&
+        (activeAnalysisThreads() - initialAnalysisThreads).isEmpty()
+    }
+
+    assertThat(error.get()).isNull()
   }
 
   private fun assumeCameraAvailable() {

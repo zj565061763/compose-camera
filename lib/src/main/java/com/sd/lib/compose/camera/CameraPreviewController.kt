@@ -14,10 +14,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
-import java.util.WeakHashMap
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.FutureTask
-import kotlin.math.abs
 
 /** 管理一次 [CameraPreview] 会话和帧分发 */
 internal class CameraPreviewController(
@@ -68,6 +64,8 @@ internal class CameraPreviewController(
   private var _sessionIdentity: CameraFrameTransformIdentity? = null
   @Volatile
   private var _cameraSurfaceTexture: SurfaceTexture? = null
+  @Volatile
+  private var _sampledSurfaceFrameSession: SampledSurfaceFrameSession? = null
   private var _surfaceTexture: SurfaceTexture? = textureView.surfaceTexture.takeIf { textureView.isAvailable }
   private var _started = false
   @Volatile
@@ -111,10 +109,16 @@ internal class CameraPreviewController(
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+      val isActive = !_closed && _shouldRun
+      val isCurrentSurface = _cameraSurfaceTexture === surface
       _autoFocusCoordinator.onSurfaceTextureUpdated(
-        isActive = !_closed && _shouldRun,
-        isCurrentSurface = _cameraSurfaceTexture === surface,
+        isActive = isActive,
+        isCurrentSurface = isCurrentSurface,
       )
+      if (!isActive || !isCurrentSurface) return
+      val sampledSession = _sampledSurfaceFrameSession ?: return
+      if (_sessionIdentity !== sampledSession.sessionIdentity) return
+      _sampledFrameDispatcher?.offer(sampledSession.sessionIdentity, sampledSession.isPreviewMirrored)
     }
   }
 
@@ -225,7 +229,7 @@ internal class CameraPreviewController(
       return
     }
     val parameters = camera.parameters
-    parameters.previewFormat = ImageFormat.NV21
+    if (_previewFrameDispatcher != null) parameters.previewFormat = ImageFormat.NV21
     val currentPreviewViewSize = previewViewSizeProvider()
     val previewSize = choosePreviewSize(
       sizes = parameters.supportedPreviewSizes.map { size -> IntSize(size.width, size.height) },
@@ -238,9 +242,7 @@ internal class CameraPreviewController(
     camera.parameters = parameters
 
     val configuredParameters = camera.parameters
-    if (_previewFrameDispatcher != null || _sampledFrameDispatcher != null) {
-      checkNv21PreviewFormat(configuredParameters.previewFormat)
-    }
+    if (_previewFrameDispatcher != null) checkNv21PreviewFormat(configuredParameters.previewFormat)
     val configuredSize = configuredParameters.previewSize
     val configuredFocusMode = configuredParameters.focusMode
     val bufferSize = IntSize(configuredSize.width, configuredSize.height)
@@ -279,8 +281,6 @@ internal class CameraPreviewController(
       camera = camera,
       bufferSize = bufferSize,
       rotationDegrees = frameRotationDegrees,
-      sessionIdentity = sessionIdentity,
-      isPreviewMirrored = cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT,
       generation = generation,
     )
     if (!isCurrentStartRequest(generation)) {
@@ -295,6 +295,12 @@ internal class CameraPreviewController(
     }
     // 先清空旧生产者尚未消费的更新，再启用新会话首帧门控，避免漏掉同步提交的首帧
     _autoFocusCoordinator.armFirstPreviewFrame(sessionIdentity)
+    _sampledSurfaceFrameSession = _sampledFrameDispatcher?.let {
+      SampledSurfaceFrameSession(
+        sessionIdentity = sessionIdentity,
+        isPreviewMirrored = cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT,
+      )
+    }
     camera.startPreview()
     if (_camera !== camera || !isCurrentStartRequest(generation)) {
       stopCamera()
@@ -338,13 +344,9 @@ internal class CameraPreviewController(
     camera: Camera,
     bufferSize: IntSize,
     rotationDegrees: Int,
-    sessionIdentity: CameraFrameTransformIdentity,
-    isPreviewMirrored: Boolean,
     generation: Long,
   ) {
-    val previewDispatcher = _previewFrameDispatcher
-    val sampledDispatcher = _sampledFrameDispatcher
-    if (previewDispatcher == null && sampledDispatcher == null) return
+    val previewDispatcher = _previewFrameDispatcher ?: return
     val bufferBytes = checkNotNull(nv21BufferSize(bufferSize.width, bufferSize.height)) {
       "The camera reported an invalid NV21 preview size: $bufferSize."
     }
@@ -359,26 +361,14 @@ internal class CameraPreviewController(
         reportNullPreviewCallbackAndStop(::reportSessionFailure, ::stopCamera)
         return@setPreviewCallbackWithBuffer
       }
-      if (previewDispatcher != null) {
-        previewDispatcher.offer(
-          data = data,
-          width = bufferSize.width,
-          height = bufferSize.height,
-          rotationDegrees = rotationDegrees,
-          transformIdentity = transformIdentityProvider(),
-          returnBuffer = { buffer -> returnCallbackBuffer(source, buffer) },
-        )
-      } else {
-        var failure: Throwable? = null
-        try {
-          sampledDispatcher?.offer(sessionIdentity, isPreviewMirrored)
-        } catch (error: Throwable) {
-          failure = error
-        } finally {
-          failure = releaseFrameBuffer(data, { buffer -> returnCallbackBuffer(source, buffer) }, failure)
-        }
-        reportFrameFailure(failure, onError)
-      }
+      previewDispatcher.offer(
+        data = data,
+        width = bufferSize.width,
+        height = bufferSize.height,
+        rotationDegrees = rotationDegrees,
+        transformIdentity = transformIdentityProvider(),
+        returnBuffer = { buffer -> returnCallbackBuffer(source, buffer) },
+      )
     }
   }
 
@@ -421,6 +411,7 @@ internal class CameraPreviewController(
     _oneShotAutoFocus = null
     _camera = null
     _sessionIdentity = null
+    _sampledSurfaceFrameSession = null
     _autoFocusCoordinator.clearFirstPreviewFrame()
     _cameraSurfaceTexture = null
     _previewFrameDispatcher?.discardPending()
@@ -499,342 +490,10 @@ internal class CameraPreviewController(
   }
 }
 
+private data class SampledSurfaceFrameSession(
+  val sessionIdentity: CameraFrameTransformIdentity,
+  val isPreviewMirrored: Boolean,
+)
+
 private const val CAMERA_CALLBACK_BUFFER_COUNT = 3
-private const val MAX_PREVIEW_PIXELS = 1280 * 960
-private const val PREVIEW_QUALITY_AREA_DIVISOR = 4
-private const val AUTO_FOCUS_TIMEOUT_MILLIS = 3_000L
 private val SURFACE_TEXTURE_RELEASE_COORDINATOR = SurfaceTextureReleaseCoordinator()
-
-internal fun postStopThenRelease(
-  post: (Runnable) -> Boolean,
-  stop: () -> Unit,
-  release: () -> Unit,
-) {
-  val task = Runnable {
-    try {
-      stop()
-    } finally {
-      release()
-    }
-  }
-  if (!post(task)) release()
-}
-
-internal fun reportNullPreviewCallbackAndStop(
-  onError: (Throwable) -> Unit,
-  stopSession: () -> Unit,
-) {
-  try {
-    onError(nullPreviewCallbackBufferException())
-  } finally {
-    stopSession()
-  }
-}
-
-/** 延迟释放仍被相机会话使用的 SurfaceTexture。 */
-internal class SurfaceTextureReleaseCoordinator(
-  private val releaseSurfaceTexture: (SurfaceTexture) -> Unit = SurfaceTexture::release,
-) {
-  private val _lock = Any()
-  private val _states = WeakHashMap<SurfaceTexture, SurfaceTextureReleaseState>()
-
-  fun retain(surfaceTexture: SurfaceTexture) {
-    synchronized(_lock) {
-      val state = _states.getOrPut(surfaceTexture, ::SurfaceTextureReleaseState)
-      check(!state.releaseRequested && !state.released) { "SurfaceTexture has already been destroyed." }
-      state.useCount++
-    }
-  }
-
-  fun requestRelease(surfaceTexture: SurfaceTexture) {
-    val shouldRelease = synchronized(_lock) {
-      val state = _states.getOrPut(surfaceTexture, ::SurfaceTextureReleaseState)
-      if (state.releaseRequested || state.released) {
-        false
-      } else {
-        state.releaseRequested = true
-        if (state.useCount == 0) {
-          state.released = true
-          true
-        } else {
-          false
-        }
-      }
-    }
-    if (shouldRelease) releaseSurfaceTexture(surfaceTexture)
-  }
-
-  fun releaseAfterUse(surfaceTexture: SurfaceTexture) {
-    val shouldRelease = synchronized(_lock) {
-      val state = checkNotNull(_states[surfaceTexture]) { "SurfaceTexture is not retained." }
-      check(state.useCount > 0) { "SurfaceTexture use count is already zero." }
-      state.useCount--
-      if (state.useCount == 0 && state.releaseRequested) {
-        state.released = true
-        true
-      } else {
-        if (state.useCount == 0) _states.remove(surfaceTexture)
-        false
-      }
-    }
-    if (shouldRelease) releaseSurfaceTexture(surfaceTexture)
-  }
-}
-
-private class SurfaceTextureReleaseState {
-  var useCount = 0
-  var releaseRequested = false
-  var released = false
-}
-
-private fun <T> callOnHandlerThread(handler: Handler, action: () -> T): T {
-  if (Looper.myLooper() === handler.looper) return action()
-  val task = FutureTask(action)
-  check(handler.post(task)) { "The target handler thread is not available." }
-  return try {
-    task.get()
-  } catch (error: ExecutionException) {
-    throw error.cause ?: error
-  } catch (error: InterruptedException) {
-    Thread.currentThread().interrupt()
-    throw error
-  }
-}
-
-/** 消费当前会话首个有效预览更新，并把首帧和显式对焦请求投递到相机线程 */
-internal class CameraPreviewAutoFocusCoordinator(
-  private val post: (Runnable) -> Boolean,
-  private val currentSessionIdentity: () -> CameraFrameTransformIdentity?,
-  private val isClosed: () -> Boolean,
-  private val requestAutoFocus: () -> Unit,
-  private val onPreviewFrameAvailable: (CameraFrameTransformIdentity) -> Unit,
-  private val onError: (Throwable) -> Unit,
-) {
-  private val _lock = Any()
-  private var _firstPreviewFrameSessionIdentity: CameraFrameTransformIdentity? = null
-
-  fun armFirstPreviewFrame(sessionIdentity: CameraFrameTransformIdentity) {
-    synchronized(_lock) {
-      _firstPreviewFrameSessionIdentity = sessionIdentity
-    }
-  }
-
-  fun clearFirstPreviewFrame() {
-    synchronized(_lock) {
-      _firstPreviewFrameSessionIdentity = null
-    }
-  }
-
-  fun onSurfaceTextureUpdated(isActive: Boolean, isCurrentSurface: Boolean) {
-    val sessionIdentity = synchronized(_lock) {
-      val pendingIdentity = _firstPreviewFrameSessionIdentity
-      if (
-        pendingIdentity != null && isActive && isCurrentSurface && !isClosed() &&
-        currentSessionIdentity() === pendingIdentity
-      ) {
-        _firstPreviewFrameSessionIdentity = null
-        pendingIdentity
-      } else {
-        null
-      }
-    } ?: return
-    onPreviewFrameAvailable(sessionIdentity)
-    request(sessionIdentity)
-  }
-
-  fun requestCurrentSession() {
-    currentSessionIdentity()?.also(::request)
-  }
-
-  private fun request(sessionIdentity: CameraFrameTransformIdentity) {
-    if (isClosed()) return
-    val request = Runnable {
-      if (!isClosed() && currentSessionIdentity() === sessionIdentity) requestAutoFocus()
-    }
-    if (!post(request) && !isClosed()) {
-      onError(IllegalStateException("The camera thread is not available for autofocus."))
-    }
-  }
-}
-
-/** 串行执行单次自动对焦请求，忙碌期间只保留一次待处理请求 */
-internal class OneShotAutoFocus(
-  private val handler: Handler,
-  private val timeoutMillis: Long = AUTO_FOCUS_TIMEOUT_MILLIS,
-  private val focus: (onComplete: () -> Unit) -> Unit,
-  private val onError: (Throwable) -> Unit,
-) : AutoCloseable {
-  private var _closed = false
-  private var _focusing = false
-  private var _pending = false
-  private var _generation = 0L
-  private var _timeoutTask: Runnable? = null
-
-  init {
-    require(timeoutMillis > 0) { "timeoutMillis must be positive." }
-  }
-
-  fun request() {
-    if (_closed) return
-    if (_focusing) {
-      _pending = true
-      return
-    }
-    startFocus()
-  }
-
-  private fun startFocus() {
-    _focusing = true
-    val generation = ++_generation
-    val timeoutTask = Runnable { finish(generation) }.also { _timeoutTask = it }
-    try {
-      focus { finishOnHandler(generation) }
-    } catch (error: Exception) {
-      try {
-        onError(error)
-      } finally {
-        finish(generation)
-      }
-      return
-    }
-    if (_closed || !_focusing || _generation != generation) return
-    if (!handler.postDelayed(timeoutTask, timeoutMillis)) {
-      try {
-        onError(IllegalStateException("The camera thread is not available for autofocus timeout."))
-      } finally {
-        finish(generation)
-      }
-    }
-  }
-
-  private fun finishOnHandler(generation: Long) {
-    if (Looper.myLooper() === handler.looper) {
-      finish(generation)
-    } else {
-      handler.post { finish(generation) }
-    }
-  }
-
-  private fun finish(generation: Long) {
-    if (_closed || !_focusing || _generation != generation) return
-    _timeoutTask?.also(handler::removeCallbacks)
-    _timeoutTask = null
-    _focusing = false
-    if (_pending) {
-      _pending = false
-      startFocus()
-    }
-  }
-
-  override fun close() {
-    if (_closed) return
-    _closed = true
-    _generation++
-    _focusing = false
-    _pending = false
-    _timeoutTask?.also(handler::removeCallbacks)
-    _timeoutTask = null
-  }
-}
-
-/** 执行全部普通清理；即使发生异常，也始终执行最后的资源释放。 */
-internal fun runCameraCleanupActions(
-  actions: List<() -> Unit>,
-  finalAction: () -> Unit,
-): Exception? {
-  var firstFailure: Exception? = null
-
-  fun runAction(action: () -> Unit) {
-    try {
-      action()
-    } catch (error: Exception) {
-      val previousFailure = firstFailure
-      if (previousFailure == null) {
-        firstFailure = error
-      } else if (previousFailure !== error) {
-        previousFailure.addSuppressed(error)
-      }
-    }
-  }
-
-  try {
-    actions.forEach(::runAction)
-  } finally {
-    runAction(finalAction)
-  }
-  return firstFailure
-}
-
-internal fun choosePreviewSize(
-  sizes: List<IntSize>,
-  previewViewSize: IntSize,
-  rotationDegrees: Int,
-): IntSize {
-  require(sizes.isNotEmpty()) { "The camera did not report any preview size." }
-  val targetAspectRatio = if (previewViewSize.width > 0 && previewViewSize.height > 0) {
-    previewViewSize.width.toFloat() / previewViewSize.height
-  } else {
-    1f
-  }
-  val normalizedRotation = normalizeRotation(rotationDegrees)
-  val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
-  val aspectComparator = compareBy<IntSize> { size ->
-    val orientedWidth = if (isQuarterTurn) size.height else size.width
-    val orientedHeight = if (isQuarterTurn) size.width else size.height
-    abs(orientedWidth.toFloat() / orientedHeight - targetAspectRatio)
-  }
-  val boundedSizes = sizes.filter { size -> previewArea(size) <= MAX_PREVIEW_PIXELS }
-  return if (boundedSizes.isNotEmpty()) {
-    val largestArea = boundedSizes.maxOf(::previewArea)
-    boundedSizes
-      .filter { size -> previewArea(size) >= largestArea / PREVIEW_QUALITY_AREA_DIVISOR }
-      .minWithOrNull(aspectComparator.thenByDescending(::previewArea))
-  } else {
-    sizes.minByOrNull(::previewArea)
-  } ?: sizes.first()
-}
-
-private fun previewArea(size: IntSize): Long = size.width.toLong() * size.height
-
-internal fun calculateCameraDisplayOrientation(cameraInfo: Camera.CameraInfo, displayRotation: Int): Int {
-  val displayDegrees = displayRotationDegrees(displayRotation)
-  return if (cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
-    val result = (cameraInfo.orientation + displayDegrees) % 360
-    (360 - result) % 360
-  } else {
-    (cameraInfo.orientation - displayDegrees + 360) % 360
-  }
-}
-
-internal fun calculateCameraFrameRotation(cameraInfo: Camera.CameraInfo, displayRotation: Int): Int {
-  val displayDegrees = displayRotationDegrees(displayRotation)
-  return if (cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
-    (cameraInfo.orientation + displayDegrees) % 360
-  } else {
-    (cameraInfo.orientation - displayDegrees + 360) % 360
-  }
-}
-
-private fun displayRotationDegrees(displayRotation: Int): Int {
-  return when (displayRotation) {
-    Surface.ROTATION_0 -> 0
-    Surface.ROTATION_90 -> 90
-    Surface.ROTATION_180 -> 180
-    Surface.ROTATION_270 -> 270
-    else -> 0
-  }
-}
-
-internal fun chooseFocusMode(supportedModes: List<String>?): String? {
-  return when {
-    supportedModes == null -> null
-    Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE in supportedModes -> {
-      Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE
-    }
-    Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO in supportedModes -> {
-      Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO
-    }
-    Camera.Parameters.FOCUS_MODE_AUTO in supportedModes -> Camera.Parameters.FOCUS_MODE_AUTO
-    else -> null
-  }
-}

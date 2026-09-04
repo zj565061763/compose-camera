@@ -447,9 +447,9 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
-  internal fun clearSession(sessionIdentity: CameraFrameTransformIdentity? = null) {
+  internal fun clearSession(sessionIdentity: CameraFrameTransformIdentity? = null): Boolean {
     val current = _transformConfig.get()
-    if (sessionIdentity != null && current.sessionIdentity !== sessionIdentity) return
+    if (sessionIdentity != null && current.sessionIdentity !== sessionIdentity) return false
     _failureClearingSessionIdentity = null
     _transformConfig.set(
       current.copy(
@@ -464,6 +464,7 @@ class CameraPreviewState internal constructor() {
     )
     _previewTransformRevision.intValue++
     _previewResolution.value = IntSize.Zero
+    return true
   }
 
   @MainThread
