@@ -543,12 +543,14 @@ class CameraPreviewIntegrationTest {
   @Test
   fun retry_serializesAnalysisCallbacksAcrossControllerGenerations() {
     assumeCameraAvailable()
+    val initialCameraThreads = activeCameraThreads()
     val firstCallbackStarted = CountDownLatch(1)
     val releaseFirstCallback = CountDownLatch(1)
     val nextCallbackStarted = CountDownLatch(1)
     val callbackCount = AtomicInteger()
     val activeCallbacks = AtomicInteger()
     val overlappingCallbacks = AtomicBoolean()
+    val callbackThreads = CopyOnWriteArrayList<Thread>()
     val state = CameraPreviewState()
     val error = AtomicReference<Throwable?>()
 
@@ -558,6 +560,7 @@ class CameraPreviewIntegrationTest {
         state = state,
         onError = error::set,
         frameProcessor = FrameProcessor.Preview {
+          callbackThreads += Thread.currentThread()
           if (activeCallbacks.incrementAndGet() > 1) overlappingCallbacks.set(true)
           try {
             if (callbackCount.incrementAndGet() == 1) {
@@ -598,6 +601,8 @@ class CameraPreviewIntegrationTest {
     assertThat(nextCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
     assertThat(callbackCount.get()).isAtLeast(2)
     assertThat(overlappingCallbacks.get()).isFalse()
+    assertThat(callbackThreads.distinct()).hasSize(1)
+    assertThat(activeCameraThreads() - initialCameraThreads).hasSize(1)
     assertThat(error.get()).isNull()
   }
 
@@ -968,10 +973,13 @@ class CameraPreviewIntegrationTest {
       releaseCompleted.countDown()
     }
     lateinit var controller: CameraPreviewController
+    lateinit var runtime: CameraPreviewRuntime
 
     _composeRule.runOnUiThread {
       val textureView = TextureView(_composeRule.activity)
+      runtime = CameraPreviewRuntime()
       controller = CameraPreviewController(
+        runtime = runtime,
         lifecycleOwner = lifecycleOwner,
         textureView = textureView,
         cameraId = null,
@@ -997,7 +1005,10 @@ class CameraPreviewIntegrationTest {
     assertThat(releaseThreadName.get()).isEqualTo(CAMERA_OPERATION_THREAD_NAME)
     assertThat(receivedError.get()).isNull()
 
-    _composeRule.runOnUiThread { controller.close() }
+    _composeRule.runOnUiThread {
+      controller.close()
+      runtime.close()
+    }
     _composeRule.waitUntil(timeoutMillis = CLEANUP_TIMEOUT_MILLIS) {
       (activeCameraThreads() - initialCameraThreads).isEmpty()
     }
@@ -1012,7 +1023,9 @@ class CameraPreviewIntegrationTest {
 
     _composeRule.runOnUiThread {
       textureView = TextureView(_composeRule.activity)
+      val runtime = CameraPreviewRuntime()
       val controller = CameraPreviewController(
+        runtime = runtime,
         lifecycleOwner = lifecycleOwner,
         textureView = textureView,
         cameraId = null,
@@ -1031,6 +1044,7 @@ class CameraPreviewIntegrationTest {
       val listener = checkNotNull(textureView.surfaceTextureListener)
 
       controller.close()
+      runtime.close()
 
       assertThat(textureView.surfaceTextureListener).isSameInstanceAs(listener)
     }

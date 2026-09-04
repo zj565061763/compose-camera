@@ -108,8 +108,8 @@ git diff --check
 - Surface 销毁时必须先在相机线程停止会话，再释放 `SurfaceTexture`。
 - 普通布局尺寸、`contentScale`、镜像模式和用户 lambda 变化只更新显示、坐标或回调引用，不得重复打开相机。
 - displayRotation、cameraId、帧处理模式和 retry generation 变化需要重建会话。
-- 只有 `frameProcessor` 不是 `FrameProcessor.None` 时才创建回调缓冲区和专用单线程 executor。
-- Controller 在 `CameraPreview-Camera` 专用线程执行全部相机会话操作，只释放自己打开的相机和创建的线程，禁止影响进程内其他相机使用方。
+- 只有 `frameProcessor` 不是 `FrameProcessor.None` 时才创建回调缓冲区；专用单线程 analysis executor 在首个分析任务到达时懒创建。
+- 单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用 `CameraPreview-Camera` 和 `CameraPreview-Analysis` 工作线程。Controller 在相机线程执行全部相机会话操作并只释放自己打开的相机；退出组合或 Lifecycle 销毁且所有 Controller 清理完成后，由 runtime 关闭工作线程，禁止影响进程内其他相机使用方。
 - 库不协调并发相机会话，不支持不同 cameraId 同时预览。
 
 ## 预览与帧坐标转换
@@ -125,7 +125,7 @@ git diff --check
 
 ## 线程、错误与清理
 
-- 帧处理回调在名为 `CameraPreview-Analysis` 的专用线程同步执行，只保留正在处理的帧和最新待处理帧或采样请求。
+- 帧处理回调在当前 `CameraPreview` 共享的 `CameraPreview-Analysis` 专用线程同步执行，只保留正在处理的帧和最新待处理帧或采样请求。
 - 相机打开、配置、预览、对焦、回调缓冲区归还和释放统一在 `CameraPreview-Camera` 专用线程执行。
 - 优先使用连续对焦模式；只支持 `FOCUS_MODE_AUTO` 时，在当前会话首个有效预览帧触发一次单次对焦，之后仅响应 `CameraPreviewState.requestFocus()`，并在会话停止时丢弃待处理请求。
 - 每个相机回调缓冲区都必须在 `finally` 中归还。释放会丢弃尚未开始的帧，但不能中断已经开始的回调。

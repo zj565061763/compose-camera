@@ -1349,6 +1349,42 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun cameraPreviewRuntime_reusesCameraThreadUntilLastLeaseCloses() {
+    val runtime = CameraPreviewRuntime()
+    val firstLease = runtime.acquire()
+    val secondLease = runtime.acquire()
+    val callbacks = CountDownLatch(2)
+    val cameraThread = AtomicReference<Thread?>()
+
+    try {
+      assertThat(firstLease.cameraHandler.looper).isSameInstanceAs(secondLease.cameraHandler.looper)
+      check(firstLease.cameraHandler.post {
+        cameraThread.compareAndSet(null, Thread.currentThread())
+        callbacks.countDown()
+      })
+
+      firstLease.close()
+      runtime.close()
+
+      check(secondLease.cameraHandler.post {
+        cameraThread.compareAndSet(null, Thread.currentThread())
+        callbacks.countDown()
+      })
+      assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
+
+      secondLease.close()
+      checkNotNull(cameraThread.get()).join(5_000)
+
+      assertThat(checkNotNull(cameraThread.get()).isAlive).isFalse()
+      assertThrows(IllegalStateException::class.java) { runtime.acquire() }
+    } finally {
+      firstLease.close()
+      secondLease.close()
+      runtime.close()
+    }
+  }
+
+  @Test
   fun cameraFrame_toBitmapCopiesNv21Pixels() {
     val width = 4
     val height = 4
@@ -1530,10 +1566,9 @@ class CameraPreviewStateTest {
   }
 
   @Test
-  fun analysisCoordinator_serializesRawCallbacksAcrossDispatchers() {
-    val coordinator = CameraAnalysisCoordinator()
-    val firstExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "FirstAnalysis") }
-    val secondExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "SecondAnalysis") }
+  fun analysisCoordinator_reusesSingleExecutorAcrossRawDispatchers() {
+    val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "SharedAnalysis") }
+    val coordinator = CameraAnalysisCoordinator { executor }
     val firstStarted = CountDownLatch(1)
     val releaseFirst = CountDownLatch(1)
     val secondStarted = CountDownLatch(1)
@@ -1561,13 +1596,11 @@ class CameraPreviewStateTest {
       callback,
       error::set,
       analysisCoordinator = coordinator,
-      executor = firstExecutor,
     )
     val secondDispatcher = CameraFrameDispatcher(
       callback,
       error::set,
       analysisCoordinator = coordinator,
-      executor = secondExecutor,
     )
 
     try {
@@ -1584,10 +1617,12 @@ class CameraPreviewStateTest {
       assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(seen).containsExactly(1, 3).inOrder()
-      assertThat(callbackThreads).containsExactly("FirstAnalysis", "SecondAnalysis").inOrder()
+      assertThat(callbackThreads).containsExactly("SharedAnalysis", "SharedAnalysis").inOrder()
       assertThat(returned).containsExactly(1, 2, 3)
-      assertThat(firstExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(executor.isShutdown).isFalse()
       assertThat(error.get()).isNull()
+      coordinator.close()
+      assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
     } finally {
       releaseFirst.countDown()
       firstDispatcher.close()
@@ -1598,9 +1633,8 @@ class CameraPreviewStateTest {
 
   @Test
   fun analysisCoordinator_serializesSampledCallbackAfterRawDispatcher() {
-    val coordinator = CameraAnalysisCoordinator()
-    val rawExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "RawAnalysis") }
-    val sampledExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "SampledAnalysis") }
+    val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "SharedAnalysis") }
+    val coordinator = CameraAnalysisCoordinator { executor }
     val now = AtomicLong(1_000)
     val rawStarted = CountDownLatch(1)
     val releaseRaw = CountDownLatch(1)
@@ -1618,7 +1652,6 @@ class CameraPreviewStateTest {
       },
       onError = error::set,
       analysisCoordinator = coordinator,
-      executor = rawExecutor,
     )
     val sampledDispatcher = PreviewSampledFrameDispatcher(
       mainHandler = Handler(Looper.getMainLooper()),
@@ -1638,7 +1671,6 @@ class CameraPreviewStateTest {
       onError = error::set,
       elapsedRealtimeMillis = now::get,
       analysisCoordinator = coordinator,
-      executor = sampledExecutor,
     )
 
     try {
@@ -1660,61 +1692,15 @@ class CameraPreviewStateTest {
       assertThat(sampledStarted.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(rawBufferReturned.await(5, TimeUnit.SECONDS)).isTrue()
       assertThat(capturedIdentities).containsExactly(latestIdentity)
-      assertThat(sampledThread.get()).isEqualTo("SampledAnalysis")
-      assertThat(rawExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(sampledThread.get()).isEqualTo("SharedAnalysis")
+      assertThat(executor.isShutdown).isFalse()
       assertThat(error.get()).isNull()
+      coordinator.close()
+      assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
     } finally {
       releaseRaw.countDown()
       rawDispatcher.close()
       sampledDispatcher.close()
-      coordinator.close()
-    }
-  }
-
-  @Test
-  fun analysisCoordinator_handoffRejectionReturnsFrameAndStopsOldExecutor() {
-    val coordinator = CameraAnalysisCoordinator()
-    val firstExecutor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "FirstAnalysis") }
-    val rejectedExecutor = Executors.newSingleThreadExecutor().also { it.shutdown() }
-    val firstStarted = CountDownLatch(1)
-    val releaseFirst = CountDownLatch(1)
-    val buffersReturned = CountDownLatch(2)
-    val callbackCount = AtomicInteger()
-    val receivedError = AtomicReference<Throwable?>()
-    val returned = mutableListOf<Int>()
-    val firstDispatcher = CameraFrameDispatcher(
-      onFrame = {
-        callbackCount.incrementAndGet()
-        firstStarted.countDown()
-        check(releaseFirst.await(5, TimeUnit.SECONDS))
-      },
-      onError = receivedError::set,
-      analysisCoordinator = coordinator,
-      executor = firstExecutor,
-    )
-    val rejectedDispatcher = CameraFrameDispatcher(
-      onFrame = { callbackCount.incrementAndGet() },
-      onError = receivedError::set,
-      analysisCoordinator = coordinator,
-      executor = rejectedExecutor,
-    )
-
-    try {
-      firstDispatcher.offerFrame(1, returned, buffersReturned)
-      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
-      firstDispatcher.close()
-      rejectedDispatcher.offerFrame(2, returned, buffersReturned)
-      releaseFirst.countDown()
-
-      assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
-      assertThat(firstExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue()
-      assertThat(callbackCount.get()).isEqualTo(1)
-      assertThat(returned).containsExactly(1, 2)
-      assertThat(receivedError.get()).isInstanceOf(RejectedExecutionException::class.java)
-    } finally {
-      releaseFirst.countDown()
-      firstDispatcher.close()
-      rejectedDispatcher.close()
       coordinator.close()
     }
   }
@@ -1732,6 +1718,7 @@ class CameraPreviewStateTest {
     val executor = Executors.newSingleThreadExecutor { runnable ->
       Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME)
     }
+    val coordinator = CameraAnalysisCoordinator { executor }
     var dispatcher: CameraFrameDispatcher? = null
 
     try {
@@ -1745,7 +1732,7 @@ class CameraPreviewStateTest {
       val currentDispatcher = CameraFrameDispatcher(
         onFrame = { Thread.currentThread().interrupt() },
         onError = error::set,
-        executor = executor,
+        analysisCoordinator = coordinator,
       ).also { dispatcher = it }
 
       currentDispatcher.offer(
@@ -1770,7 +1757,8 @@ class CameraPreviewStateTest {
       assertThat(error.get()).isNull()
     } finally {
       releaseCamera.countDown()
-      dispatcher?.close() ?: executor.shutdown()
+      dispatcher?.close()
+      coordinator.close()
       cameraThread.quitSafely()
       cameraThread.join(5_000)
     }
@@ -1779,13 +1767,14 @@ class CameraPreviewStateTest {
   @Test
   fun frameDispatcher_executorRejectionReturnsFrameAndReportsError() {
     val executor = Executors.newSingleThreadExecutor().also { it.shutdown() }
+    val coordinator = CameraAnalysisCoordinator { executor }
     val callback = CountDownLatch(1)
     val returned = CountDownLatch(1)
     val receivedError = AtomicReference<Throwable?>()
     val dispatcher = CameraFrameDispatcher(
       onFrame = { callback.countDown() },
       onError = receivedError::set,
-      executor = executor,
+      analysisCoordinator = coordinator,
     )
 
     dispatcher.offer(
@@ -1801,6 +1790,7 @@ class CameraPreviewStateTest {
     assertThat(callback.await(100, TimeUnit.MILLISECONDS)).isFalse()
     assertThat(receivedError.get()).isInstanceOf(RejectedExecutionException::class.java)
     dispatcher.close()
+    coordinator.close()
   }
 
   @Test
@@ -1966,6 +1956,7 @@ class CameraPreviewStateTest {
     val executor = Executors.newSingleThreadExecutor { runnable ->
       Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME).also(analysisThread::set)
     }
+    val coordinator = CameraAnalysisCoordinator { executor }
     val now = AtomicLong(1_000)
     val captureCount = AtomicInteger()
     val callbackCount = AtomicInteger()
@@ -1988,7 +1979,7 @@ class CameraPreviewStateTest {
         errorReceived.countDown()
       },
       elapsedRealtimeMillis = now::get,
-      executor = executor,
+      analysisCoordinator = coordinator,
     )
 
     try {
@@ -2017,6 +2008,7 @@ class CameraPreviewStateTest {
     } finally {
       releaseHandler.countDown()
       dispatcher.close()
+      coordinator.close()
       captureThread.quitSafely()
       captureThread.join(5_000)
     }
@@ -2030,6 +2022,7 @@ class CameraPreviewStateTest {
     val executor = Executors.newSingleThreadExecutor { runnable ->
       Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME).also(analysisThread::set)
     }
+    val coordinator = CameraAnalysisCoordinator { executor }
     val now = AtomicLong(1_000)
     val firstIdentity = CameraFrameTransformIdentity()
     val interruptedIdentity = CameraFrameTransformIdentity()
@@ -2072,7 +2065,7 @@ class CameraPreviewStateTest {
         errorReceived.countDown()
       },
       elapsedRealtimeMillis = now::get,
-      executor = executor,
+      analysisCoordinator = coordinator,
     )
 
     try {
@@ -2103,6 +2096,7 @@ class CameraPreviewStateTest {
     } finally {
       releaseInterruptedCapture.countDown()
       dispatcher.close()
+      coordinator.close()
       captureThread.quitSafely()
       captureThread.join(5_000)
     }
@@ -2118,6 +2112,7 @@ class CameraPreviewStateTest {
     val executor = Executors.newSingleThreadExecutor { runnable ->
       Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME).also(analysisThread::set)
     }
+    val coordinator = CameraAnalysisCoordinator { executor }
     val now = AtomicLong(1_000)
     val firstIdentity = CameraFrameTransformIdentity()
     val replacedIdentity = CameraFrameTransformIdentity()
@@ -2146,7 +2141,7 @@ class CameraPreviewStateTest {
       },
       onError = error::set,
       elapsedRealtimeMillis = now::get,
-      executor = executor,
+      analysisCoordinator = coordinator,
     )
 
     try {
@@ -2179,6 +2174,7 @@ class CameraPreviewStateTest {
     } finally {
       releaseHandler.countDown()
       dispatcher.close()
+      coordinator.close()
       captureThread.quitSafely()
       captureThread.join(5_000)
     }

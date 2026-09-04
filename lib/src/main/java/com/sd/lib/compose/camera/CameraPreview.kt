@@ -67,7 +67,7 @@ fun CameraPreview(
   val currentOnError by rememberUpdatedState(onError)
   val currentMirrorMode by rememberUpdatedState(mirrorMode)
   val errorDispatcher = remember { MainThreadErrorDispatcher { error -> currentOnError(error) } }
-  val analysisCoordinator = remember { CameraAnalysisCoordinator() }
+  val runtime = remember(lifecycleOwner) { CameraPreviewRuntime() }
   val frameProcessorMode = frameProcessor.mode
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
   // 布局变化不重建 Controller，发布最新有效尺寸供下次开会话读取
@@ -96,8 +96,8 @@ fun CameraPreview(
     onDispose { state.reset() }
   }
 
-  DisposableEffect(analysisCoordinator) {
-    onDispose { analysisCoordinator.close() }
+  DisposableEffect(runtime) {
+    onDispose { runtime.close() }
   }
 
   val currentTextureView = textureView
@@ -167,6 +167,7 @@ fun CameraPreview(
     } else {
       val failureSubscription = MainThreadErrorSubscription(failureDispatcher)
       val controller = CameraPreviewController(
+        runtime = runtime,
         lifecycleOwner = lifecycleOwner,
         textureView = currentTextureView,
         cameraId = cameraId,
@@ -217,7 +218,6 @@ fun CameraPreview(
           state.clearSession(sessionIdentity)
         },
         autoFocusOperationsFactory = autoFocusOperationsFactory,
-        analysisCoordinator = analysisCoordinator,
       )
       controller.start()
       val requestFocusAction: () -> Unit = controller::requestFocus

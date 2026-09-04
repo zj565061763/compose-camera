@@ -51,8 +51,8 @@
 - `CameraPreviewState.takeScreenshot()` 的截图入口只在对应 `CameraPreview` 组合期间有效，退出组合后必须解除，不能继续访问已经释放的 TextureView。
 - `CameraPreviewState.requestFocus()` 的对焦入口只在对应 Controller 组合期间有效，Controller 替换或退出组合后必须按入口身份解除，旧 Controller 不得清除或接收新会话的请求。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
-- Controller 在 `CameraPreview-Camera` 专用线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作。
-- Controller 只释放自己打开的相机和创建的工作线程，不得影响进程内其他相机使用方。
+- 单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用同一个 `CameraPreview-Camera` 专用线程，旧 generation 的停止与新 generation 的启动按提交顺序执行。
+- Controller 在相机线程执行打开、配置、预览、对焦、回调缓冲区归还和释放操作，只释放自己打开的相机；`CameraPreview` 退出组合或 Lifecycle 销毁且所有 Controller 清理完成后，runtime 才关闭自己创建的工作线程，不得影响进程内其他相机使用方。
 - 打开、配置或运行错误会停止当前会话；外部条件恢复后可以调用 `CameraPreviewState.retry()`。
 
 ## 预览尺寸、旋转与镜像
@@ -73,8 +73,9 @@
 
 ## 帧线程与缓冲区
 
-- 只有 `frameProcessor` 不是 `None` 时才创建名为 `CameraPreview-Analysis` 的专用单线程 executor 和三个 NV21 回调缓冲区。
-- 单个正在组合的 `CameraPreview` 必须在连续 Controller generation 间共享分析串行协调器；旧回调完成前，新 generation 的原始帧和采样帧只能合并保留最新待处理任务，禁止并发进入用户回调。
+- 只有 `frameProcessor` 不是 `None` 时才创建三个 NV21 回调缓冲区；名为 `CameraPreview-Analysis` 的单线程 executor 在首个分析任务到达时懒创建，并由单个正在组合的 `CameraPreview` 在连续 Controller generation 间复用。
+- 原始帧和采样帧共享分析串行协调器；旧回调完成前，新 generation 只能合并保留最新待处理任务，禁止并发进入用户回调。
+- 回调任务在 generation 有效性检查处取得执行权；会话停止或 dispatcher 关闭会使尚未取得执行权的任务失效，但不等待已经取得执行权的同步回调。
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
 - `PreviewSampled` 请求在主线程真正开始截图前始终可以被更新请求替换；分析协调器提前取出调度任务不能固化待截图请求。
