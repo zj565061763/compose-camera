@@ -1815,7 +1815,10 @@ class CameraPreviewStateTest {
       now.set(1_300)
       dispatcher.offer(latestIdentity, isPreviewMirrored = false)
 
-      checkNotNull(analysisThread.get()).interrupt()
+      val worker = checkNotNull(analysisThread.get())
+      assertThat(awaitThreadState(worker, Thread.State.WAITING, 5_000)).isTrue()
+
+      worker.interrupt()
       releaseInterruptedCapture.countDown()
 
       assertThat(errorReceived.await(5, TimeUnit.SECONDS)).isTrue()
