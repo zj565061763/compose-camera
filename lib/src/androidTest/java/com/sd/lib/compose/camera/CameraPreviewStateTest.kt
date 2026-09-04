@@ -37,6 +37,7 @@ class CameraPreviewStateTest {
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(200, 200), ContentScale.Crop, isMirrored = false)
     state.startSession(identity, IntSize(640, 480), rotationDegrees = 0, isMirrored = false)
+    state.markPreviewFrameAvailable(identity)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 640, 480, 0)))
     val center = floatArrayOf(320f, 240f).also(matrix::mapPoints)
@@ -55,6 +56,7 @@ class CameraPreviewStateTest {
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(225, 300), ContentScale.FillBounds, isMirrored = false)
     state.startSession(identity, IntSize(640, 480), rotationDegrees = 90, isMirrored = false)
+    state.markPreviewFrameAvailable(identity)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 640, 480, 90)))
     val points = floatArrayOf(
@@ -149,6 +151,7 @@ class CameraPreviewStateTest {
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(200, 100), ContentScale.FillBounds, isMirrored = true)
     state.startSession(identity, IntSize(200, 100), rotationDegrees = 0, isMirrored = true)
+    state.markPreviewFrameAvailable(identity)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 200, 100, 0)))
     val points = floatArrayOf(0f, 0f, 200f, 100f).also(matrix::mapPoints)
@@ -162,6 +165,7 @@ class CameraPreviewStateTest {
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(3, 3), ContentScale.Crop, isMirrored = true)
     state.startSession(identity, IntSize(4, 2), rotationDegrees = 0, isMirrored = true)
+    state.markPreviewFrameAvailable(identity)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 4, 2, 0)))
     val points = floatArrayOf(0f, 0f, 4f, 2f).also(matrix::mapPoints)
@@ -175,6 +179,7 @@ class CameraPreviewStateTest {
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(4, 3), ContentScale.Fit, isMirrored = true)
     state.startSession(identity, IntSize(2, 2), rotationDegrees = 0, isMirrored = true)
+    state.markPreviewFrameAvailable(identity)
     val bitmap = Bitmap.createBitmap(4, 3, Bitmap.Config.ARGB_8888)
     val frame = CameraFrame.PreviewSampled(bitmap, rotationDegrees = 0, transformIdentity = identity)
 
@@ -227,6 +232,42 @@ class CameraPreviewStateTest {
     val points = floatArrayOf(0f, 0f, 200f, 100f).also(transform::mapPoints)
 
     assertThat(points.asList()).containsExactly(200f, 0f, 0f, 100f).inOrder()
+  }
+
+  @Test
+  fun newSessionRawFrameToken_remainsInvalidUntilFirstPreviewFrame() {
+    val state = CameraPreviewState()
+    val firstSessionIdentity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(200, 100), ContentScale.Crop, isMirrored = true)
+    state.startSession(firstSessionIdentity, IntSize(200, 100), rotationDegrees = 0, isMirrored = true)
+    state.markPreviewFrameAvailable(firstSessionIdentity)
+    val firstFrame = frame(firstSessionIdentity, 200, 100, 0)
+    assertThat(state.isFrameTransformCurrent(firstFrame.transformToken)).isTrue()
+
+    val secondSessionIdentity = CameraFrameTransformIdentity()
+    state.startSession(secondSessionIdentity, IntSize(320, 240), rotationDegrees = 90, isMirrored = false)
+    val earlyFrame = CameraFrame.Preview(
+      data = ByteArray(320 * 240 * 3 / 2),
+      width = 320,
+      height = 240,
+      rotationDegrees = 90,
+      transformIdentity = state.currentTransformIdentity(),
+    )
+
+    assertThat(state.currentTransformIdentity()).isNull()
+    assertThat(state.isFrameTransformCurrent(firstFrame.transformToken)).isFalse()
+    assertThat(state.isFrameTransformCurrent(earlyFrame.transformToken)).isFalse()
+    assertThat(state.createTransformToPreview(earlyFrame)).isNull()
+
+    state.updatePreviewLayout(IntSize(240, 320), ContentScale.Fit, isMirrored = false)
+    assertThat(state.currentTransformIdentity()).isNull()
+    state.markPreviewFrameAvailable(secondSessionIdentity)
+
+    assertThat(state.isFrameTransformCurrent(earlyFrame.transformToken)).isFalse()
+    assertThat(state.createTransformToPreview(earlyFrame)).isNull()
+    val currentFrame = frame(secondSessionIdentity, 320, 240, 90)
+    assertThat(state.isFrameTransformCurrent(currentFrame.transformToken)).isTrue()
+    assertThat(state.createTransformToPreview(currentFrame)).isNotNull()
   }
 
   @Test
@@ -647,6 +688,7 @@ class CameraPreviewStateTest {
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(200, 100), ContentScale.Fit, isMirrored = false)
     state.startSession(identity, IntSize(200, 100), rotationDegrees = 0, isMirrored = false)
+    state.markPreviewFrameAvailable(identity)
     val oldFrame = frame(identity, 200, 100, 0)
     assertThat(state.isFrameTransformCurrent(oldFrame.transformToken)).isTrue()
 
@@ -661,6 +703,7 @@ class CameraPreviewStateTest {
     val identity = CameraFrameTransformIdentity()
     state.updatePreviewLayout(IntSize(200, 200), ContentScale.Crop, isMirrored = false)
     state.startSession(identity, IntSize(200, 200), rotationDegrees = 0, isMirrored = false)
+    state.markPreviewFrameAvailable(identity)
     val oldFrame = frame(identity, 200, 200, 0)
     assertThat(state.isFrameTransformCurrent(oldFrame.transformToken)).isTrue()
 
@@ -676,6 +719,7 @@ class CameraPreviewStateTest {
     state.updatePreviewLayout(IntSize(200, 100), ContentScale.FillBounds, isMirrored = false)
 
     state.startSession(identity, IntSize(200, 100), rotationDegrees = 0, isMirrored = true)
+    state.markPreviewFrameAvailable(identity)
 
     val matrix = checkNotNull(state.createTransformToPreview(frame(identity, 200, 100, 0)))
     val points = floatArrayOf(0f, 0f, 200f, 100f).also(matrix::mapPoints)
@@ -1343,6 +1387,119 @@ class CameraPreviewStateTest {
     assertThat(callbackCount.get()).isEqualTo(1)
     assertThat(returned).containsExactly(1, 2)
     assertThat(error.get()).isNull()
+  }
+
+  @Test
+  fun analysisCoordinator_serializesRawCallbacksAcrossDispatchers() {
+    val coordinator = CameraAnalysisCoordinator()
+    val firstStarted = CountDownLatch(1)
+    val releaseFirst = CountDownLatch(1)
+    val secondStarted = CountDownLatch(1)
+    val callbacks = CountDownLatch(2)
+    val buffersReturned = CountDownLatch(3)
+    val seen = mutableListOf<Int>()
+    val returned = mutableListOf<Int>()
+    val error = AtomicReference<Throwable?>()
+    val callback: (CameraFrame.Preview) -> Unit = { frame ->
+      val value = frame.data[0].toInt()
+      synchronized(seen) { seen += value }
+      if (value == 1) {
+        firstStarted.countDown()
+        check(releaseFirst.await(5, TimeUnit.SECONDS))
+      } else {
+        secondStarted.countDown()
+      }
+      callbacks.countDown()
+    }
+    val firstDispatcher = CameraFrameDispatcher(callback, error::set, analysisCoordinator = coordinator)
+    val secondDispatcher = CameraFrameDispatcher(callback, error::set, analysisCoordinator = coordinator)
+
+    try {
+      firstDispatcher.offerFrame(1, returned, buffersReturned)
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue()
+      firstDispatcher.close()
+      secondDispatcher.offerFrame(2, returned, buffersReturned)
+      secondDispatcher.offerFrame(3, returned, buffersReturned)
+      firstDispatcher.discardPending()
+
+      assertThat(secondStarted.await(200, TimeUnit.MILLISECONDS)).isFalse()
+      releaseFirst.countDown()
+
+      assertThat(callbacks.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(buffersReturned.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(seen).containsExactly(1, 3).inOrder()
+      assertThat(returned).containsExactly(1, 2, 3)
+      assertThat(error.get()).isNull()
+    } finally {
+      releaseFirst.countDown()
+      firstDispatcher.close()
+      secondDispatcher.close()
+      coordinator.close()
+    }
+  }
+
+  @Test
+  fun analysisCoordinator_serializesSampledCallbackAfterRawDispatcher() {
+    val coordinator = CameraAnalysisCoordinator()
+    val now = AtomicLong(1_000)
+    val rawStarted = CountDownLatch(1)
+    val releaseRaw = CountDownLatch(1)
+    val rawBufferReturned = CountDownLatch(1)
+    val sampledStarted = CountDownLatch(1)
+    val capturedIdentities = mutableListOf<CameraFrameTransformIdentity>()
+    val returned = mutableListOf<Int>()
+    val error = AtomicReference<Throwable?>()
+    val rawDispatcher = CameraFrameDispatcher(
+      onFrame = {
+        rawStarted.countDown()
+        check(releaseRaw.await(5, TimeUnit.SECONDS))
+      },
+      onError = error::set,
+      analysisCoordinator = coordinator,
+    )
+    val sampledDispatcher = PreviewSampledFrameDispatcher(
+      mainHandler = Handler(Looper.getMainLooper()),
+      intervalMillis = { 100 },
+      captureFrame = { identity, _ ->
+        synchronized(capturedIdentities) { capturedIdentities += identity }
+        CameraFrame.PreviewSampled(
+          data = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+          rotationDegrees = 0,
+          transformIdentity = identity,
+        )
+      },
+      onFrame = { sampledStarted.countDown() },
+      onError = error::set,
+      elapsedRealtimeMillis = now::get,
+      analysisCoordinator = coordinator,
+    )
+
+    try {
+      rawDispatcher.offerFrame(1, returned, rawBufferReturned)
+      assertThat(rawStarted.await(5, TimeUnit.SECONDS)).isTrue()
+      rawDispatcher.close()
+      sampledDispatcher.start()
+      val replacedIdentity = CameraFrameTransformIdentity()
+      val latestIdentity = CameraFrameTransformIdentity()
+      now.set(1_100)
+      sampledDispatcher.offer(replacedIdentity, isPreviewMirrored = false)
+      now.set(1_200)
+      sampledDispatcher.offer(latestIdentity, isPreviewMirrored = false)
+
+      assertThat(sampledStarted.await(200, TimeUnit.MILLISECONDS)).isFalse()
+      assertThat(synchronized(capturedIdentities) { capturedIdentities.toList() }).isEmpty()
+      releaseRaw.countDown()
+
+      assertThat(sampledStarted.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(rawBufferReturned.await(5, TimeUnit.SECONDS)).isTrue()
+      assertThat(capturedIdentities).containsExactly(latestIdentity)
+      assertThat(error.get()).isNull()
+    } finally {
+      releaseRaw.countDown()
+      rawDispatcher.close()
+      sampledDispatcher.close()
+      coordinator.close()
+    }
   }
 
   @Test

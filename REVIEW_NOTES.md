@@ -47,6 +47,7 @@
 - 显示旋转、cameraId、帧处理模式、retry generation 或相关设备快照变化会重建会话。
 - 普通布局尺寸、`contentScale`、镜像模式、处理间隔、用户 lambda 或 `onError` lambda 实例变化不得重复打开相机。
 - 会话重建时保留上一帧已经应用的显示矩阵；启动新预览前必须在主线程消费旧生产者尚未处理的 TextureView 更新，再启用新会话首帧门控。新会话的内容矩阵和额外镜像只能在首个属于当前 Surface 和会话的 `onSurfaceTextureUpdated` 回调中同步切换，禁止遗漏首帧、误认旧缓冲、把旧帧短暂恢复为 identity 或提前套用新会话矩阵。
+- 新会话首帧上屏前不得向原始帧发布可用的 transform identity；首帧前创建的 token 在首帧上屏后也必须保持无效，避免新会话分析结果叠加到旧会话画面。
 - `CameraPreviewState.takeScreenshot()` 的截图入口只在对应 `CameraPreview` 组合期间有效，退出组合后必须解除，不能继续访问已经释放的 TextureView。
 - `CameraPreviewState.requestFocus()` 的对焦入口只在对应 Controller 组合期间有效，Controller 替换或退出组合后必须按入口身份解除，旧 Controller 不得清除或接收新会话的请求。
 - `CameraPreviewState.reset()` 必须同时清零 retry generation，避免同一状态实例再次组合时重放已消费的 `retry()`。
@@ -72,6 +73,7 @@
 ## 帧线程与缓冲区
 
 - 只有 `frameProcessor` 不是 `None` 时才创建名为 `CameraPreview-Analysis` 的专用单线程 executor 和三个 NV21 回调缓冲区。
+- 单个正在组合的 `CameraPreview` 必须在连续 Controller generation 间共享分析串行协调器；旧回调完成前，新 generation 的原始帧和采样帧只能合并保留最新待处理任务，禁止并发进入用户回调。
 - `Preview` 保留正在处理的帧和最新一帧；新帧会替换尚未开始的旧帧。
 - `PreviewSampled` 使用相机帧回调作为采样节拍，NV21 缓冲区立即归还；达到间隔后在主线程截取 `TextureView`，分析尚未结束时只保留最新待采样请求。
 - `Camera.PreviewCallback` 返回 `null` 缓冲区时必须报告 `CAMERA_RUNTIME_ERROR` 并停止当前会话，禁止让空值异常逃逸相机线程。

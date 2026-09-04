@@ -541,6 +541,67 @@ class CameraPreviewIntegrationTest {
   }
 
   @Test
+  fun retry_serializesAnalysisCallbacksAcrossControllerGenerations() {
+    assumeCameraAvailable()
+    val firstCallbackStarted = CountDownLatch(1)
+    val releaseFirstCallback = CountDownLatch(1)
+    val nextCallbackStarted = CountDownLatch(1)
+    val callbackCount = AtomicInteger()
+    val activeCallbacks = AtomicInteger()
+    val overlappingCallbacks = AtomicBoolean()
+    val state = CameraPreviewState()
+    val error = AtomicReference<Throwable?>()
+
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(240.dp),
+        state = state,
+        onError = error::set,
+        frameProcessor = FrameProcessor.Preview {
+          if (activeCallbacks.incrementAndGet() > 1) overlappingCallbacks.set(true)
+          try {
+            if (callbackCount.incrementAndGet() == 1) {
+              firstCallbackStarted.countDown()
+              check(releaseFirstCallback.await(FRAME_TIMEOUT_SECONDS * 2, TimeUnit.SECONDS))
+            } else {
+              nextCallbackStarted.countDown()
+            }
+          } finally {
+            activeCallbacks.decrementAndGet()
+          }
+        },
+      )
+    }
+
+    try {
+      assertThat(firstCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+      lateinit var initialSessionIdentity: CameraFrameTransformIdentity
+      _composeRule.runOnIdle {
+        initialSessionIdentity = checkNotNull(state.currentSessionIdentity())
+        state.retry()
+      }
+      _composeRule.waitUntil(timeoutMillis = FRAME_TIMEOUT_SECONDS * 1_000) {
+        val currentSessionIdentity = state.currentSessionIdentity()
+        error.get() != null || (
+          currentSessionIdentity != null &&
+            currentSessionIdentity !== initialSessionIdentity &&
+            state.isPreviewFrameAvailable()
+        )
+      }
+
+      assertThat(error.get()).isNull()
+      assertThat(nextCallbackStarted.await(300, TimeUnit.MILLISECONDS)).isFalse()
+    } finally {
+      releaseFirstCallback.countDown()
+    }
+
+    assertThat(nextCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    assertThat(callbackCount.get()).isAtLeast(2)
+    assertThat(overlappingCallbacks.get()).isFalse()
+    assertThat(error.get()).isNull()
+  }
+
+  @Test
   fun mirrorModeChange_updatesTransformWithoutRestartingSession() {
     assumeCameraAvailable()
     val mirrorMode = mutableStateOf(CameraMirrorMode.AUTO)

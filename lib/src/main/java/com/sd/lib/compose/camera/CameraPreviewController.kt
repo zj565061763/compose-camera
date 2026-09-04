@@ -49,10 +49,11 @@ internal class CameraPreviewController(
   private val onError: (Throwable) -> Unit,
   private val onSessionClosed: (CameraFrameTransformIdentity?) -> Unit,
   private val autoFocusOperationsFactory: CameraAutoFocusOperationsFactory = PlatformCameraAutoFocusOperationsFactory,
+  private val analysisCoordinator: CameraAnalysisCoordinator = CameraAnalysisCoordinator(),
 ) : AutoCloseable {
   private val _mainHandler = Handler(Looper.getMainLooper())
   private val _previewFrameDispatcher = (frameProcessor as? ActiveFrameProcessor.Preview)?.let { processor ->
-    CameraFrameDispatcher(processor.onFrame, onError)
+    CameraFrameDispatcher(processor.onFrame, onError, analysisCoordinator = analysisCoordinator)
   }
   private val _sampledFrameDispatcher = (frameProcessor as? ActiveFrameProcessor.PreviewSampled)?.let { processor ->
     PreviewSampledFrameDispatcher(
@@ -61,6 +62,7 @@ internal class CameraPreviewController(
       captureFrame = captureSampledFrame,
       onFrame = processor.onFrame,
       onError = onError,
+      analysisCoordinator = analysisCoordinator,
     )
   }
   private val _cameraThread = HandlerThread(CAMERA_OPERATION_THREAD_NAME).also { it.start() }
@@ -795,18 +797,91 @@ internal fun runCameraCleanupActions(
   return firstFailure
 }
 
+/** 在单个 CameraPreview 生命周期内串行协调分析，只保留最新待处理任务。 */
+internal class CameraAnalysisCoordinator : AutoCloseable {
+  private val _lock = Any()
+  private var _processing = false
+  private var _pending: PendingCameraAnalysis? = null
+  private var _closed = false
+
+  fun offer(
+    owner: Any,
+    execute: (Runnable) -> Unit,
+    process: () -> Unit,
+    discard: (Throwable?) -> Unit,
+  ) {
+    val analysis = PendingCameraAnalysis(owner, process, discard)
+    var replaced: PendingCameraAnalysis? = null
+    var schedulingFailure: Throwable? = null
+    synchronized(_lock) {
+      if (_closed) {
+        replaced = analysis
+      } else if (_processing) {
+        replaced = _pending
+        _pending = analysis
+      } else {
+        _processing = true
+        _pending = analysis
+        try {
+          execute(Runnable(::drain))
+        } catch (error: Throwable) {
+          _processing = false
+          _pending = null
+          replaced = analysis
+          schedulingFailure = error
+        }
+      }
+    }
+    replaced?.also { dropped -> dropped.discard(schedulingFailure) }
+  }
+
+  fun discardPending(owner: Any) {
+    val pending = synchronized(_lock) {
+      _pending?.takeIf { analysis -> analysis.owner === owner }?.also { _pending = null }
+    }
+    pending?.also { analysis -> analysis.discard(null) }
+  }
+
+  private fun drain() {
+    while (true) {
+      val analysis = synchronized(_lock) {
+        val next = _pending
+        _pending = null
+        if (next == null) _processing = false
+        next
+      } ?: return
+      analysis.process()
+    }
+  }
+
+  override fun close() {
+    val pending = synchronized(_lock) {
+      if (_closed) return
+      _closed = true
+      _pending.also { _pending = null }
+    }
+    pending?.also { analysis -> analysis.discard(null) }
+  }
+}
+
+private class PendingCameraAnalysis(
+  val owner: Any,
+  val process: () -> Unit,
+  val discard: (Throwable?) -> Unit,
+)
+
+private fun createCameraAnalysisExecutor(): ExecutorService {
+  return Executors.newSingleThreadExecutor { runnable -> Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME) }
+}
+
 /** 单线程发布最新 NV21 帧，并在处理完成或被替换时归还回调缓冲区。 */
 internal class CameraFrameDispatcher(
   private val onFrame: (CameraFrame.Preview) -> Unit,
   private val onError: (Throwable) -> Unit,
-  executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-    Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME)
-  },
+  private val analysisCoordinator: CameraAnalysisCoordinator = CameraAnalysisCoordinator(),
+  private val executor: ExecutorService = createCameraAnalysisExecutor(),
 ) : AutoCloseable {
   private val _lock = Any()
-  private val _executor = executor
-  private var _processing = false
-  private var _pending: PendingCameraFrame? = null
   private var _closed = false
 
   fun offer(
@@ -829,76 +904,59 @@ internal class CameraFrameDispatcher(
       transformIdentity = transformIdentity,
       returnBuffer = returnBuffer,
     )
-    var replaced: PendingCameraFrame? = null
-    var schedulingFailure: Throwable? = null
+    var shouldDiscard = false
     synchronized(_lock) {
       if (_closed) {
-        replaced = frame
-      } else if (_processing) {
-        replaced = _pending
-        _pending = frame
+        shouldDiscard = true
       } else {
-        _processing = true
-        _pending = frame
-        try {
-          _executor.execute(::drain)
-        } catch (error: Throwable) {
-          _processing = false
-          _pending = null
-          replaced = frame
-          schedulingFailure = error
-        }
+        analysisCoordinator.offer(
+          owner = this,
+          execute = executor::execute,
+          process = { process(frame) },
+          discard = { failure -> reportOrThrow(releaseFrameBuffer(frame, failure)) },
+        )
       }
     }
-    replaced?.also { dropped ->
-      reportOrThrow(releaseFrameBuffer(dropped, schedulingFailure))
-    }
+    if (shouldDiscard) reportOrThrow(releaseFrameBuffer(frame))
   }
 
-  private fun drain() {
-    while (true) {
-      val pending = synchronized(_lock) {
-        val next = _pending
-        _pending = null
-        if (next == null) _processing = false
-        next
-      } ?: return
-
-      var failure: Throwable? = null
-      try {
-        onFrame(
-          CameraFrame.Preview(
-            data = pending.data,
-            width = pending.width,
-            height = pending.height,
-            rotationDegrees = pending.rotationDegrees,
-            transformIdentity = pending.transformIdentity,
-          ),
-        )
-      } catch (error: Throwable) {
-        failure = error
-      } finally {
-        failure = releaseFrameBuffer(pending, failure)
-      }
-      reportOrThrow(failure)
+  private fun process(frame: PendingCameraFrame) {
+    var failure: Throwable? = null
+    try {
+      onFrame(
+        CameraFrame.Preview(
+          data = frame.data,
+          width = frame.width,
+          height = frame.height,
+          rotationDegrees = frame.rotationDegrees,
+          transformIdentity = frame.transformIdentity,
+        ),
+      )
+    } catch (error: Throwable) {
+      failure = error
+    } finally {
+      failure = releaseFrameBuffer(frame, failure)
     }
+    reportOrThrow(failure)
   }
 
   fun discardPending() {
-    val pending = synchronized(_lock) { _pending.also { _pending = null } }
-    pending?.also { reportOrThrow(releaseFrameBuffer(it)) }
+    analysisCoordinator.discardPending(this)
   }
 
   override fun close() {
-    val pending = synchronized(_lock) {
-      if (_closed) return
-      _closed = true
-      _pending.also { _pending = null }
+    var shouldClose = false
+    synchronized(_lock) {
+      if (!_closed) {
+        _closed = true
+        shouldClose = true
+      }
     }
+    if (!shouldClose) return
     try {
-      pending?.also { reportOrThrow(releaseFrameBuffer(it)) }
+      analysisCoordinator.discardPending(this)
     } finally {
-      _executor.shutdown()
+      executor.shutdown()
     }
   }
 
@@ -915,18 +973,14 @@ internal class PreviewSampledFrameDispatcher(
   private val onFrame: (CameraFrame.PreviewSampled) -> Unit,
   private val onError: (Throwable) -> Unit,
   private val elapsedRealtimeMillis: () -> Long = SystemClock::elapsedRealtime,
+  private val analysisCoordinator: CameraAnalysisCoordinator = CameraAnalysisCoordinator(),
+  private val executor: ExecutorService = createCameraAnalysisExecutor(),
 ) : AutoCloseable {
   private val _lock = Any()
-  private val _executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-    Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME)
-  }
   private var _started = false
   private var _closed = false
   private var _lastSampleTimeMillis = 0L
   private var _runGeneration = 0L
-  private var _capturePosted = false
-  private var _processing = false
-  private var _pending: PendingSampledFrame? = null
 
   fun start() {
     synchronized(_lock) {
@@ -938,108 +992,74 @@ internal class PreviewSampledFrameDispatcher(
   }
 
   fun offer(sessionIdentity: CameraFrameTransformIdentity, isPreviewMirrored: Boolean) {
-    var shouldPostCapture = false
     synchronized(_lock) {
       if (!_started || _closed) return
       val now = elapsedRealtimeMillis()
       val currentIntervalMillis = intervalMillis()
       if (currentIntervalMillis <= 0 || now - _lastSampleTimeMillis < currentIntervalMillis) return
       _lastSampleTimeMillis = now
-      _pending = PendingSampledFrame(sessionIdentity, isPreviewMirrored)
-      if (!_processing && !_capturePosted) {
-        _capturePosted = true
-        shouldPostCapture = true
-      }
-    }
-    if (shouldPostCapture && !mainHandler.post(::capturePending)) {
-      synchronized(_lock) { _capturePosted = false }
-      onError(IllegalStateException("The main thread is not available for preview sampling."))
+      val pending = PendingSampledFrame(sessionIdentity, isPreviewMirrored)
+      val runGeneration = _runGeneration
+      analysisCoordinator.offer(
+        owner = this,
+        execute = executor::execute,
+        process = { process(pending, runGeneration) },
+        discard = { failure -> reportFrameFailure(failure, onError) },
+      )
     }
   }
 
-  private fun capturePending() {
-    val capture = synchronized(_lock) {
-      _capturePosted = false
-      if (!_started || _closed || _processing) return
-      val pending = _pending ?: return
-      _pending = null
-      _processing = true
-      ActiveSampledCapture(pending, _runGeneration)
-    }
-
+  private fun process(pending: PendingSampledFrame, runGeneration: Long) {
     val frame = try {
-      captureFrame(capture.pending.sessionIdentity, capture.pending.isPreviewMirrored)
+      callOnHandlerThread(mainHandler) {
+        if (isCurrent(runGeneration)) {
+          captureFrame(pending.sessionIdentity, pending.isPreviewMirrored)
+        } else {
+          null
+        }
+      }
     } catch (error: Throwable) {
-      finishProcessing()
       reportFrameFailure(error, onError)
       return
-    }
-    if (frame == null) {
-      finishProcessing()
-      return
-    }
-    try {
-      _executor.execute { process(frame, capture.runGeneration) }
-    } catch (error: Throwable) {
-      val failure = recycleSampledFrame(frame, error)
-      finishProcessing()
-      reportFrameFailure(failure, onError)
-    }
-  }
-
-  private fun process(frame: CameraFrame.PreviewSampled, runGeneration: Long) {
-    val shouldProcess = synchronized(_lock) {
-      _started && !_closed && _runGeneration == runGeneration
-    }
-    if (!shouldProcess) {
-      val failure = recycleSampledFrame(frame)
-      finishProcessing()
-      reportFrameFailure(failure, onError)
-      return
-    }
+    } ?: return
 
     var failure: Throwable? = null
     try {
-      onFrame(frame)
+      if (isCurrent(runGeneration)) onFrame(frame)
     } catch (error: Throwable) {
       failure = error
     } finally {
       failure = recycleSampledFrame(frame, failure)
-      finishProcessing()
     }
     reportFrameFailure(failure, onError)
   }
 
-  private fun finishProcessing() {
-    var shouldPostCapture = false
-    synchronized(_lock) {
-      _processing = false
-      if (_started && !_closed && _pending != null && !_capturePosted) {
-        _capturePosted = true
-        shouldPostCapture = true
-      }
-    }
-    if (shouldPostCapture && !mainHandler.post(::capturePending)) {
-      synchronized(_lock) { _capturePosted = false }
-      onError(IllegalStateException("The main thread is not available for preview sampling."))
+  private fun isCurrent(runGeneration: Long): Boolean {
+    return synchronized(_lock) {
+      _started && !_closed && _runGeneration == runGeneration
     }
   }
 
   fun stop() {
-    synchronized(_lock) {
-      _started = false
-      _pending = null
-    }
+    synchronized(_lock) { _started = false }
+    analysisCoordinator.discardPending(this)
   }
 
   override fun close() {
+    var shouldClose = false
     synchronized(_lock) {
-      if (_closed) return
-      _closed = true
-      _started = false
-      _pending = null
+      if (!_closed) {
+        _closed = true
+        _started = false
+        shouldClose = true
+      }
     }
-    _executor.shutdown()
+    if (!shouldClose) return
+    try {
+      analysisCoordinator.discardPending(this)
+    } finally {
+      executor.shutdown()
+    }
   }
 }
 
@@ -1132,11 +1152,6 @@ private data class PendingCameraFrame(
 private data class PendingSampledFrame(
   val sessionIdentity: CameraFrameTransformIdentity,
   val isPreviewMirrored: Boolean,
-)
-
-private data class ActiveSampledCapture(
-  val pending: PendingSampledFrame,
-  val runGeneration: Long,
 )
 
 internal fun choosePreviewSize(

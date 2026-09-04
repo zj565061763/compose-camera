@@ -85,7 +85,8 @@ class CameraPreviewState internal constructor() {
   /** 判断异步结果是否仍属于当前预览变换 */
   @AnyThread
   fun isFrameTransformCurrent(token: CameraFrameTransformToken): Boolean {
-    return token.matches(_transformConfig.get().transformIdentity)
+    val config = _transformConfig.get()
+    return config.isPreviewFrameAvailable && token.matches(config.transformIdentity)
   }
 
   @AnyThread
@@ -110,7 +111,7 @@ class CameraPreviewState internal constructor() {
   @AnyThread
   fun createTransformToPreview(frame: CameraFrame): Matrix? {
     val config = _transformConfig.get()
-    if (!frame.transformToken.matches(config.transformIdentity)) return null
+    if (!config.isPreviewFrameAvailable || !frame.transformToken.matches(config.transformIdentity)) return null
     return when (frame) {
       is CameraFrame.Preview -> createPreviewFrameTransform(frame, config)
       is CameraFrame.PreviewSampled -> createSampledFrameTransform(frame, config)
@@ -320,10 +321,10 @@ class CameraPreviewState internal constructor() {
         contentScale = contentScale,
         geometry = geometry,
         isMirrored = isMirrored,
-        transformIdentity = if (transformChanged && current.sessionIdentity != null) {
-          CameraFrameTransformIdentity()
-        } else {
-          current.transformIdentity
+        transformIdentity = when {
+          !current.isPreviewFrameAvailable -> null
+          transformChanged && current.sessionIdentity != null -> CameraFrameTransformIdentity()
+          else -> current.transformIdentity
         },
       ),
     )
@@ -425,7 +426,7 @@ class CameraPreviewState internal constructor() {
     _transformConfig.set(
       current.copy(
         sessionIdentity = sessionIdentity,
-        transformIdentity = sessionIdentity,
+        transformIdentity = null,
         bufferSize = bufferSize,
         rotationDegrees = normalizedRotation,
         isPreviewMirrored = isPreviewMirrored,
@@ -481,7 +482,12 @@ class CameraPreviewState internal constructor() {
   ): Matrix? {
     val current = _transformConfig.get()
     if (current.sessionIdentity !== sessionIdentity || current.isPreviewFrameAvailable) return null
-    _transformConfig.set(current.copy(isPreviewFrameAvailable = true))
+    _transformConfig.set(
+      current.copy(
+        transformIdentity = sessionIdentity,
+        isPreviewFrameAvailable = true,
+      ),
+    )
     if (_failureClearingSessionIdentity === sessionIdentity) {
       _failureClearingSessionIdentity = null
       _sessionFailure = null
