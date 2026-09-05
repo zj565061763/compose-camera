@@ -62,6 +62,7 @@
 - 普通布局变化只更新最新有效尺寸，不立即重建当前会话；Lifecycle 或 Surface 后续自然重开时必须按最新尺寸重新选择预览分辨率。
 - 设置参数后必须重新读取设备实际采用的 preview format 和 preview size；启用原始帧处理且格式不是 NV21 时停止创建会话，尺寸用于发布 `previewResolution` 和创建回调缓冲区。
 - `TextureView` 保持 Compose 预览区域尺寸，并通过内容变换矩阵应用旋转后的原始帧比例和 `ContentScale`，避免 AndroidView 互操作层把相机缓冲区直接拉伸到预览区域。
+- 有效布局尺寸变化时，必须在当次测量中同步更新坐标快照和 `TextureView` 内容矩阵，禁止依赖下一次重组纠正当前帧；新会话首帧尚未显示时仍保留旧画面的矩阵。
 - 前置摄像头必须分别计算平台预览显示方向和原始帧旋转角度；`setDisplayOrientation()` 的镜像补偿结果不能用于 `CameraFrame.rotationDegrees`。
 - 平台默认镜像前置预览。额外水平翻转合并到 `TextureView` 内容矩阵，只用于补偿平台默认状态与 `CameraMirrorMode` 目标状态的差异。
 - 优先使用连续对焦模式；设备只支持 `FOCUS_MODE_AUTO` 时，在当前会话首个有效预览帧触发一次单次对焦，之后仅响应 `CameraPreviewState.requestFocus()`。进行中的请求只合并保留一次，回调超时后允许后续请求继续执行；会话停止时丢弃尚未执行或迟到的回调。
@@ -109,6 +110,7 @@
 - `CameraPreviewBitmapTest.kt` 与 `CameraPreviewParametersTest.kt` 覆盖截图像素与所有权、Bitmap 转换、尺寸选择和前后摄像头旋转。
 - `CameraPreviewAutoFocusTest.kt`、`CameraPreviewCleanupTest.kt` 与 `CameraPreviewRuntimeTest.kt` 覆盖首帧和 session 对焦协调、单次对焦调度、异常安全清理、Runtime store 及工作线程复用。
 - `CameraTextureViewTest.kt` 覆盖生产者帧计数、尺寸和透明度变化的伪更新、单帧确认及 Surface 重建。
+- `CameraPreviewLayoutTest.kt` 使用系统绘制时钟，覆盖布局尺寸变化后首次绘制的 `Crop` 和镜像 `Fit` 矩阵，避免 Compose 测试时钟在绘制前推进多次重组而掩盖一帧延迟。
 - `CameraFrameDispatcherTest.kt` 与 `PreviewSampledFrameDispatcherTest.kt` 覆盖 NV21 校验、原始帧与采样帧分发、回调进入门控、缓冲区所有权、错误聚合和线程 interrupt 隔离。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、LifecycleOwner 交接、无活动 Controller 时的 Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。

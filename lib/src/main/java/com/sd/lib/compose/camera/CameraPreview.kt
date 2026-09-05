@@ -308,6 +308,10 @@ fun CameraPreview(
       if (size.width > 0 && size.height > 0) latestPreviewViewSize.set(size)
       previewSize = size
       state.updatePreviewLayout(size, contentScale, targetMirrored)
+      // 对已显示的会话同步更新矩阵，避免尺寸变化当帧仍使用旧值。
+      state.calculateCurrentTextureViewTransform(size, contentScale, targetMirrored)?.also { transform ->
+        textureView?.setTransform(transform)
+      }
     },
   )
 }
