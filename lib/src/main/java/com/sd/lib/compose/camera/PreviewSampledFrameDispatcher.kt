@@ -17,6 +17,7 @@ internal class PreviewSampledFrameDispatcher(
   private val elapsedRealtimeMillis: () -> Long = SystemClock::elapsedRealtime,
   analysisCoordinator: CameraAnalysisCoordinator? = null,
   private val beforeFrameCallback: (() -> Unit)? = null,
+  private val onCaptureWaitInterrupted: (() -> Unit)? = null,
 ) : AutoCloseable {
   private val _lock = Any()
   private val _closeLock = Any()
@@ -64,7 +65,7 @@ internal class PreviewSampledFrameDispatcher(
   private fun process(runGeneration: Long) {
     if (!hasPending(runGeneration)) return
     val frame = try {
-      captureSampledFrameOnHandlerThread(mainHandler) {
+      captureSampledFrameOnHandlerThread(mainHandler, onCaptureWaitInterrupted) {
         takePending(runGeneration)?.let { pending ->
           captureFrame(pending.sessionIdentity, pending.isPreviewMirrored)
         }
@@ -151,6 +152,7 @@ internal class PreviewSampledFrameDispatcher(
 /** 中断时取消未执行的截图；已经执行时等待并回收结果。 */
 private fun captureSampledFrameOnHandlerThread(
   handler: Handler,
+  onInterrupted: (() -> Unit)?,
   captureFrame: () -> CameraFrame.PreviewSampled?,
 ): CameraFrame.PreviewSampled? {
   if (Looper.myLooper() === handler.looper) return captureFrame()
@@ -163,6 +165,11 @@ private fun captureSampledFrameOnHandlerThread(
   } catch (error: InterruptedException) {
     var failure: Throwable = error
     try {
+      try {
+        onInterrupted?.invoke()
+      } catch (callbackFailure: Throwable) {
+        failure = mergeFailures(failure, callbackFailure)
+      }
       if (task.cancelBeforeStart()) {
         handler.removeCallbacks(task)
       } else {

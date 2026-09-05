@@ -151,6 +151,7 @@ class PreviewSampledFrameDispatcherTest {
     val latestIdentity = CameraFrameTransformIdentity()
     val firstCallback = CountDownLatch(1)
     val interruptedCaptureStarted = CountDownLatch(1)
+    val captureWaitInterrupted = CountDownLatch(1)
     val releaseInterruptedCapture = CountDownLatch(1)
     val latestCallback = CountDownLatch(1)
     val errorReceived = CountDownLatch(1)
@@ -188,6 +189,7 @@ class PreviewSampledFrameDispatcherTest {
       },
       elapsedRealtimeMillis = now::get,
       analysisCoordinator = coordinator,
+      onCaptureWaitInterrupted = captureWaitInterrupted::countDown,
     )
 
     try {
@@ -202,11 +204,9 @@ class PreviewSampledFrameDispatcherTest {
       now.set(1_300)
       dispatcher.offer(latestIdentity, isPreviewMirrored = false)
 
-      val worker = checkNotNull(analysisThread.get())
-      assertThat(awaitThreadState(worker, Thread.State.WAITING, 5_000)).isTrue()
-
-      worker.interrupt()
-      assertThat(awaitThreadInterruptCleared(worker, 5_000)).isTrue()
+      checkNotNull(analysisThread.get()).interrupt()
+      // 等待已进入中断处理分支，避免截图完成与 FutureTask.get() 的中断检查竞争。
+      assertThat(captureWaitInterrupted.await(5, TimeUnit.SECONDS)).isTrue()
       releaseInterruptedCapture.countDown()
 
       assertThat(errorReceived.await(5, TimeUnit.SECONDS)).isTrue()
@@ -549,13 +549,4 @@ private fun awaitThreadState(thread: Thread, state: Thread.State, timeoutMillis:
     Thread.yield()
   }
   return thread.state == state
-}
-
-private fun awaitThreadInterruptCleared(thread: Thread, timeoutMillis: Long): Boolean {
-  val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
-  while (System.nanoTime() < deadline) {
-    if (!thread.isInterrupted) return true
-    Thread.yield()
-  }
-  return !thread.isInterrupted
 }

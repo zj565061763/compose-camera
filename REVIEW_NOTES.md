@@ -113,6 +113,7 @@
 - `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
 - 仪器测试 APK 的 targetSdk 与 compileSdk 保持一致，避免只覆盖旧版兼容行为。
 - 异步测试使用有超时的等待，禁止固定 `sleep`；优先使用轻量 Fake、Google Truth 和显式 `AndroidJUnit4`。
+- 采样中断测试必须等待异常处理分支发出的显式信号后再放行截图，不能用线程 interrupt 标志清零作为同步条件。
 - 真实相机测试按设备能力跳过没有相机的场景。
 
 ```bash
