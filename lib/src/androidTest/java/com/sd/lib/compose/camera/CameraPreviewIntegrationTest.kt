@@ -32,6 +32,12 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
+import org.junit.Assume.assumeTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.rules.TestRule
+import org.junit.runner.RunWith
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -39,12 +45,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import org.junit.Assume.assumeTrue
-import org.junit.Rule
-import org.junit.Test
-import org.junit.rules.RuleChain
-import org.junit.rules.TestRule
-import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class CameraPreviewIntegrationTest {
@@ -257,7 +257,7 @@ class CameraPreviewIntegrationTest {
           currentSessionIdentity != null &&
           currentSessionIdentity !== previousSessionIdentity &&
           state.createCurrentTextureViewTransform(currentSessionIdentity) != null
-      )
+        )
     }
 
     assertThat(error.get()).isNull()
@@ -595,7 +595,7 @@ class CameraPreviewIntegrationTest {
         currentSessionIdentity != null &&
           currentSessionIdentity !== initialSessionIdentity &&
           state.isPreviewFrameAvailable()
-      )
+        )
     }
 
     assertThat(nextCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
@@ -738,7 +738,7 @@ class CameraPreviewIntegrationTest {
         currentSessionIdentity != null &&
           currentSessionIdentity !== initialSessionIdentity &&
           state.createCurrentTextureViewTransform(currentSessionIdentity) != null
-      )
+        )
     }
 
     assertThat(error.get()).isNull()
@@ -952,7 +952,7 @@ class CameraPreviewIntegrationTest {
           currentSessionIdentity != null &&
             currentSessionIdentity !== previousSessionIdentity &&
             state.createCurrentTextureViewTransform(currentSessionIdentity) != null
-        )
+          )
       }
       previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
     }
@@ -1023,7 +1023,7 @@ class CameraPreviewIntegrationTest {
         currentSessionIdentity != null &&
           currentSessionIdentity !== previousSessionIdentity &&
           state.createCurrentTextureViewTransform(currentSessionIdentity) != null
-      )
+        )
     }
     assertThat(nextCallbackStarted.await(FRAME_TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
     previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
@@ -1040,7 +1040,7 @@ class CameraPreviewIntegrationTest {
           currentSessionIdentity != null &&
             currentSessionIdentity !== previousSessionIdentity &&
             state.createCurrentTextureViewTransform(currentSessionIdentity) != null
-        )
+          )
       }
       previousSessionIdentity = checkNotNull(state.currentSessionIdentity())
     }
@@ -1311,7 +1311,7 @@ class CameraPreviewIntegrationTest {
         state.previewResolution.value != IntSize.Zero &&
           sessionIdentity != null &&
           state.createCurrentTextureViewTransform(sessionIdentity) != null
-      )
+        )
     }
   }
 

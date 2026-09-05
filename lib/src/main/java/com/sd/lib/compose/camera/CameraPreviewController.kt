@@ -7,7 +7,6 @@ import android.graphics.SurfaceTexture
 import android.hardware.Camera
 import android.os.Handler
 import android.os.Looper
-import android.view.Surface
 import android.view.TextureView
 import androidx.annotation.MainThread
 import androidx.compose.ui.unit.IntSize
