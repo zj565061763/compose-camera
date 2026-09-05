@@ -19,7 +19,7 @@ import androidx.lifecycle.LifecycleOwner
 internal class CameraPreviewController(
   runtimeLease: CameraPreviewRuntimeLease,
   private val lifecycleOwner: LifecycleOwner,
-  private val textureView: TextureView,
+  private val textureView: CameraTextureView,
   private val cameraId: String?,
   private val displayRotation: Int,
   private val previewViewSizeProvider: () -> IntSize,
@@ -111,10 +111,11 @@ internal class CameraPreviewController(
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
       val isActive = !_closed && _shouldRun
-      val isCurrentSurface = _cameraSurfaceTexture === surface
+      val isCurrentSurface = _cameraSurfaceTexture === surface && textureView.surfaceTexture === surface
       _autoFocusCoordinator.onSurfaceTextureUpdated(
         isActive = isActive,
         isCurrentSurface = isCurrentSurface,
+        frameNumber = textureView.frameNumber,
       )
       if (!isActive || !isCurrentSurface) return
       val sampledSession = _sampledSurfaceFrameSession ?: return
@@ -294,13 +295,13 @@ internal class CameraPreviewController(
       return
     }
     _sampledFrameDispatcher?.start()
-    drainPendingPreviewFrame(surfaceTexture)
+    val previousFrameNumber = drainPendingPreviewFrame(surfaceTexture)
     if (_camera !== camera || !isCurrentStartRequest(generation)) {
       stopCamera()
       return
     }
     // 先清空旧生产者尚未消费的更新，再启用新会话首帧门控，避免漏掉同步提交的首帧。
-    _autoFocusCoordinator.armFirstPreviewFrame(sessionIdentity)
+    _autoFocusCoordinator.armFirstPreviewFrame(sessionIdentity, previousFrameNumber)
     _sampledSurfaceFrameSession = _sampledFrameDispatcher?.let {
       SampledSurfaceFrameSession(
         sessionIdentity = sessionIdentity,
@@ -314,11 +315,12 @@ internal class CameraPreviewController(
     }
   }
 
-  private fun drainPendingPreviewFrame(surfaceTexture: SurfaceTexture) {
-    callOnMainThread {
+  private fun drainPendingPreviewFrame(surfaceTexture: SurfaceTexture): Long {
+    return callOnMainThread {
       if (textureView.isAvailable && textureView.surfaceTexture === surfaceTexture) {
         textureView.getBitmap(1, 1)?.recycle()
       }
+      textureView.frameNumber
     }
   }
 

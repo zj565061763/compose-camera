@@ -59,11 +59,14 @@ class CameraPreviewAutoFocusTest {
       onError = { error -> errors += error },
     )
 
-    coordinator.armFirstPreviewFrame(sessionIdentity)
-    coordinator.onSurfaceTextureUpdated(isActive = false, isCurrentSurface = true)
-    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = false)
-    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true)
-    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true)
+    coordinator.armFirstPreviewFrame(sessionIdentity, previousFrameNumber = 0)
+    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true, frameNumber = 0)
+    assertThat(previewFrames).isEmpty()
+    assertThat(postedTasks).isEmpty()
+    coordinator.onSurfaceTextureUpdated(isActive = false, isCurrentSurface = true, frameNumber = 1)
+    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = false, frameNumber = 1)
+    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true, frameNumber = 1)
+    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true, frameNumber = 1)
 
     assertThat(previewFrames).containsExactly(sessionIdentity)
     assertThat(postedTasks).hasSize(1)
@@ -104,14 +107,14 @@ class CameraPreviewAutoFocusTest {
     assertThat(postedTasks).isEmpty()
     currentSessionIdentity.set(firstSessionIdentity)
 
-    coordinator.armFirstPreviewFrame(firstSessionIdentity)
+    coordinator.armFirstPreviewFrame(firstSessionIdentity, previousFrameNumber = 0)
     coordinator.clearFirstPreviewFrame()
-    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true)
+    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true, frameNumber = 1)
     assertThat(previewFrames).isEmpty()
     assertThat(postedTasks).isEmpty()
 
-    coordinator.armFirstPreviewFrame(firstSessionIdentity)
-    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true)
+    coordinator.armFirstPreviewFrame(firstSessionIdentity, previousFrameNumber = 0)
+    coordinator.onSurfaceTextureUpdated(isActive = true, isCurrentSurface = true, frameNumber = 1)
     currentSessionIdentity.set(secondSessionIdentity)
     postedTasks.removeAt(0).run()
     assertThat(focusRequests.get()).isEqualTo(0)

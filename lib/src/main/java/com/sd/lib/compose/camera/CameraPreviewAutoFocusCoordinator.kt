@@ -16,10 +16,12 @@ internal class CameraPreviewAutoFocusCoordinator(
 ) {
   private val _lock = Any()
   private var _firstPreviewFrameSessionIdentity: CameraFrameTransformIdentity? = null
+  private var _previousFrameNumber = 0L
 
-  fun armFirstPreviewFrame(sessionIdentity: CameraFrameTransformIdentity) {
+  fun armFirstPreviewFrame(sessionIdentity: CameraFrameTransformIdentity, previousFrameNumber: Long) {
     synchronized(_lock) {
       _firstPreviewFrameSessionIdentity = sessionIdentity
+      _previousFrameNumber = previousFrameNumber
     }
   }
 
@@ -29,11 +31,12 @@ internal class CameraPreviewAutoFocusCoordinator(
     }
   }
 
-  fun onSurfaceTextureUpdated(isActive: Boolean, isCurrentSurface: Boolean) {
+  fun onSurfaceTextureUpdated(isActive: Boolean, isCurrentSurface: Boolean, frameNumber: Long) {
     val sessionIdentity = synchronized(_lock) {
       val pendingIdentity = _firstPreviewFrameSessionIdentity
       if (
-        pendingIdentity != null && isActive && isCurrentSurface && !isClosed() &&
+        pendingIdentity != null && frameNumber != _previousFrameNumber &&
+        isActive && isCurrentSurface && !isClosed() &&
         currentSessionIdentity() === pendingIdentity
       ) {
         _firstPreviewFrameSessionIdentity = null

@@ -63,7 +63,7 @@ fun CameraPreview(
   }
   val lifecycleOwner = LocalLifecycleOwner.current
   val autoFocusOperationsFactory = LocalCameraAutoFocusOperationsFactory.current
-  var textureView by remember { mutableStateOf<TextureView?>(null) }
+  var textureView by remember { mutableStateOf<CameraTextureView?>(null) }
 
   val currentFrameProcessor by rememberUpdatedState(frameProcessor)
   val currentOnError by rememberUpdatedState(onError)
@@ -319,7 +319,7 @@ private fun CameraPreviewTextureView(
   previewSize: IntSize,
   contentScale: ContentScale,
   targetMirrored: Boolean,
-  onTextureViewCreated: (TextureView) -> Unit,
+  onTextureViewCreated: (CameraTextureView) -> Unit,
   onSizeChanged: (IntSize) -> Unit,
 ) {
   val previewTransformRevision = state.previewTransformRevision
@@ -334,7 +334,7 @@ private fun CameraPreviewTextureView(
   }
   AndroidView(
     factory = { context ->
-      TextureView(context).also { view ->
+      CameraTextureView(context).also { view ->
         view.isOpaque = false
         onTextureViewCreated(view)
       }

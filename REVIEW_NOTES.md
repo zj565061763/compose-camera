@@ -47,6 +47,7 @@
 - 显示旋转、cameraId、帧处理模式、retry generation 或相关设备快照变化会重建会话。
 - 普通布局尺寸、`contentScale`、镜像模式、处理间隔、用户 lambda 或 `onError` lambda 实例变化不得重复打开相机。
 - 会话重建时保留上一帧已经应用的显示矩阵；启动新预览前必须在主线程消费旧生产者尚未处理的 TextureView 更新，再启用新会话首帧门控。新会话的内容矩阵和额外镜像只能在首个属于当前 Surface 和会话的 `onSurfaceTextureUpdated` 回调中同步切换，禁止遗漏首帧、误认旧缓冲、把旧帧短暂恢复为 identity 或提前套用新会话矩阵。
+- 首帧门控必须同时确认 SurfaceTexture 生产者的帧计数已变化；尺寸或透明度变化触发的 `onSurfaceTextureUpdated` 不能发布首帧。帧计数在转发平台帧监听前递增，不能依赖可能尚未由渲染线程更新的纹理时间戳。
 - 新会话首帧上屏前不得向原始帧发布可用的 transform identity；首帧前创建的 token 在首帧上屏后也必须保持无效，避免新会话分析结果叠加到旧会话画面。
 - `CameraPreviewState.takeScreenshot()` 的截图入口只在对应 `CameraPreview` 组合期间有效，退出组合后必须解除，不能继续访问已经释放的 TextureView。
 - `CameraPreviewState.requestFocus()` 的对焦入口只在对应 Controller 组合期间有效，Controller 替换或退出组合后必须按入口身份解除，旧 Controller 不得清除或接收新会话的请求。
@@ -107,6 +108,7 @@
 - `CameraPreviewStateTest.kt` 覆盖缩放矩阵、镜像、token 失效、会话状态和错误发布。
 - `CameraPreviewBitmapTest.kt` 与 `CameraPreviewParametersTest.kt` 覆盖截图像素与所有权、Bitmap 转换、尺寸选择和前后摄像头旋转。
 - `CameraPreviewAutoFocusTest.kt`、`CameraPreviewCleanupTest.kt` 与 `CameraPreviewRuntimeTest.kt` 覆盖首帧和 session 对焦协调、单次对焦调度、异常安全清理、Runtime store 及工作线程复用。
+- `CameraTextureViewTest.kt` 覆盖生产者帧计数、尺寸和透明度变化的伪更新、单帧确认及 Surface 重建。
 - `CameraFrameDispatcherTest.kt` 与 `PreviewSampledFrameDispatcherTest.kt` 覆盖 NV21 校验、原始帧与采样帧分发、回调进入门控、缓冲区所有权、错误聚合和线程 interrupt 隔离。
 - `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
 - `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、真实 Controller 的首帧和显式对焦链路、LifecycleOwner 交接、无活动 Controller 时的 Lifecycle 清理和工作线程；自动对焦测试只在硬件调用边界使用 Fake。

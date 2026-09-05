@@ -1069,7 +1069,7 @@ class CameraPreviewIntegrationTest {
     lateinit var runtime: CameraPreviewRuntime
 
     _composeRule.runOnUiThread {
-      val textureView = TextureView(_composeRule.activity)
+      val textureView = CameraTextureView(_composeRule.activity)
       runtime = CameraPreviewRuntime()
       controller = CameraPreviewController(
         runtimeLease = runtime.acquire(),
@@ -1112,10 +1112,10 @@ class CameraPreviewIntegrationTest {
     val initialCameraThreads = activeCameraThreads()
     val lifecycleOwner = FakeLifecycleOwner()
     val receivedError = AtomicReference<Throwable?>()
-    lateinit var textureView: TextureView
+    lateinit var textureView: CameraTextureView
 
     _composeRule.runOnUiThread {
-      textureView = TextureView(_composeRule.activity)
+      textureView = CameraTextureView(_composeRule.activity)
       val runtime = CameraPreviewRuntime()
       val controller = CameraPreviewController(
         runtimeLease = runtime.acquire(),
@@ -1157,10 +1157,10 @@ class CameraPreviewIntegrationTest {
     lateinit var runtime: CameraPreviewRuntime
     lateinit var controller: CameraPreviewController
     lateinit var cameraThread: Thread
-    lateinit var textureView: TextureView
+    lateinit var textureView: CameraTextureView
 
     _composeRule.runOnUiThread {
-      textureView = TextureView(_composeRule.activity)
+      textureView = CameraTextureView(_composeRule.activity)
       runtime = CameraPreviewRuntime()
       val runtimeLease = runtime.acquire()
       cameraThread = runtimeLease.cameraHandler.looper.thread
