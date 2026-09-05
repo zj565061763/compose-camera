@@ -6,8 +6,8 @@ import android.os.Handler
 import android.view.TextureView
 import java.util.concurrent.atomic.AtomicLong
 
-/** 保留 TextureView 的帧监听，并单独记录生产者提交的新帧 */
-internal open class CameraTextureView(context: Context) : TextureView(context) {
+/** 保留 TextureView 的帧监听，并单独记录生产者提交的新帧。 */
+internal class CameraTextureView(context: Context) : TextureView(context) {
   private var _surfaceTextureListener: SurfaceTextureListener? = null
 
   val frameNumber: Long
