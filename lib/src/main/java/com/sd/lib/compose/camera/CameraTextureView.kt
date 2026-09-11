@@ -58,8 +58,8 @@ private class PreviewSurfaceTexture : SurfaceTexture(0) {
   override fun setOnFrameAvailableListener(listener: OnFrameAvailableListener?, handler: Handler?) {
     // 首次绘制和可见性切换期间也记录帧；先计数，再让 TextureView 安排更新。
     super.setOnFrameAvailableListener({ surface ->
-                                        _frameNumber.incrementAndGet()
-                                        listener?.onFrameAvailable(surface)
-                                      }, handler)
+      _frameNumber.incrementAndGet()
+      listener?.onFrameAvailable(surface)
+    }, handler)
   }
 }
