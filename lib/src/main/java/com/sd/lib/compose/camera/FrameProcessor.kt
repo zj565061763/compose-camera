@@ -33,16 +33,3 @@ internal val FrameProcessor.mode: FrameProcessorMode
     is FrameProcessor.Preview -> FrameProcessorMode.PREVIEW
     is FrameProcessor.PreviewSampled -> FrameProcessorMode.PREVIEW_SAMPLED
   }
-
-internal sealed interface ActiveFrameProcessor {
-  data object None : ActiveFrameProcessor
-
-  class Preview(
-    val onFrame: (CameraFrame.Preview) -> Unit,
-  ) : ActiveFrameProcessor
-
-  class PreviewSampled(
-    val intervalMillis: () -> Long,
-    val onFrame: (CameraFrame.PreviewSampled) -> Unit,
-  ) : ActiveFrameProcessor
-}

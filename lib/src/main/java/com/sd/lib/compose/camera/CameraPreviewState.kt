@@ -13,12 +13,11 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.roundToInt
 
 /** 创建并记住当前预览的状态 */
 @Composable
@@ -29,21 +28,18 @@ fun rememberCameraPreviewState(): CameraPreviewState {
 /** 每个正在组合的 [CameraPreview] 必须使用独立实例 */
 @Stable
 class CameraPreviewState internal constructor() {
-  private val _transformConfig = AtomicReference(PreviewTransformConfig())
+  // 分析线程无锁读取，只在主线程整体替换
+  private val _snapshot = AtomicReference(PreviewSnapshot())
   private val _previewResolution = mutableStateOf(IntSize.Zero)
   private val _failure = mutableStateOf<Throwable?>(null)
-  private val _previewTransformRevision = mutableIntStateOf(0)
+  private val _displayedSession = mutableStateOf<PreviewSession?>(null)
   private val _retryGeneration = mutableIntStateOf(0)
-  private var _attemptIdentity: CameraPreviewAttemptIdentity? = null
-  private var _cameraDevicesAttemptIdentity: CameraDevicesAttemptIdentity? = null
-  private var _failureClearingSessionIdentity: CameraFrameTransformIdentity? = null
   private var _sessionFailure: Throwable? = null
-  private var _cameraDevicesFailure: ActiveCameraDevicesFailure? = null
-  private var _failureSource: CameraPreviewFailureSource? = null
+  private var _devicesFailure: Throwable? = null
   private var _takeScreenshotAction: ((CameraMirrorMode) -> Bitmap?)? = null
   private var _requestFocusAction: (() -> Unit)? = null
 
-  /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero] */
+  /** 当前会话的原始帧分辨率，会话未运行时为 [IntSize.Zero] */
   val previewResolution: State<IntSize> = _previewResolution
 
   /** 需要重新枚举设备或重建相机会话的当前故障，其他普通异常只通过 [CameraPreview] 的 `onError` 报告 */
@@ -73,35 +69,16 @@ class CameraPreviewState internal constructor() {
   /** 在外部条件恢复后关闭并重新创建当前相机会话 */
   @MainThread
   fun retry() {
-    _attemptIdentity = null
-    _cameraDevicesAttemptIdentity = null
-    clearFailures()
+    _sessionFailure = null
+    _devicesFailure = null
+    updateFailure()
     _retryGeneration.intValue++
   }
-
-  internal val retryGeneration: Int get() = _retryGeneration.intValue
-  internal val previewTransformRevision: Int get() = _previewTransformRevision.intValue
 
   /** 判断异步结果是否仍属于当前预览变换 */
   @AnyThread
   fun isFrameTransformCurrent(token: CameraFrameTransformToken): Boolean {
-    val config = _transformConfig.get()
-    return config.isPreviewFrameAvailable && config.geometry != null && token.matches(config.transformIdentity)
-  }
-
-  @AnyThread
-  internal fun currentTransformIdentity(): CameraFrameTransformIdentity? {
-    return _transformConfig.get().transformIdentity
-  }
-
-  @AnyThread
-  internal fun currentSessionIdentity(): CameraFrameTransformIdentity? {
-    return _transformConfig.get().sessionIdentity
-  }
-
-  @AnyThread
-  internal fun isPreviewFrameAvailable(): Boolean {
-    return _transformConfig.get().isPreviewFrameAvailable
+    return token.matches(_snapshot.get().transformIdentity)
   }
 
   /**
@@ -110,175 +87,85 @@ class CameraPreviewState internal constructor() {
    */
   @AnyThread
   fun createTransformToPreview(frame: CameraFrame): Matrix? {
-    val config = _transformConfig.get()
-    if (!config.isPreviewFrameAvailable || !frame.transformToken.matches(config.transformIdentity)) return null
-    return when (frame) {
-      is CameraFrame.Preview -> createPreviewFrameTransform(frame, config)
-      is CameraFrame.PreviewSampled -> createSampledFrameTransform(frame, config)
-    }
-  }
-
-  private fun createPreviewFrameTransform(frame: CameraFrame.Preview, config: PreviewTransformConfig): Matrix? {
-    if (frame.width != config.bufferSize.width || frame.height != config.bufferSize.height) return null
-    if (normalizeRotation(frame.rotationDegrees) != config.rotationDegrees) return null
-    val geometry = config.geometry ?: return null
-    val matrix = createBufferToPreviewMatrix(
-      bufferSize = config.bufferSize,
-      rotationDegrees = config.rotationDegrees,
-      geometry = geometry,
-    )
-    if (!config.isMirrored) return matrix
-
-    val mirror = Matrix().apply {
-      setValues(
-        floatArrayOf(
-          -1f, 0f, geometry.previewSize.width.toFloat(),
-          0f, 1f, 0f,
-          0f, 0f, 1f,
-        ),
-      )
-    }
-    return Matrix().apply { setConcat(mirror, matrix) }
-  }
-
-  private fun createSampledFrameTransform(
-    frame: CameraFrame.PreviewSampled,
-    config: PreviewTransformConfig,
-  ): Matrix? {
-    val geometry = config.geometry ?: return null
-    if (frame.rotationDegrees != 0) return null
-    if (frame.dataSize != config.previewSize) return null
-    if (!config.isMirrored) return Matrix()
-    return Matrix().apply {
-      setValues(
-        floatArrayOf(
-          -1f, 0f, geometry.previewSize.width.toFloat(),
-          0f, 1f, 0f,
-          0f, 0f, 1f,
-        ),
-      )
-    }
-  }
-
-  @MainThread
-  internal fun createPreviewSampleRequest(
-    sessionIdentity: CameraFrameTransformIdentity,
-    isPreviewMirrored: Boolean,
-  ): PreviewBitmapRequest? {
-    val config = _transformConfig.get()
-    if (
-      config.sessionIdentity !== sessionIdentity ||
-      config.isPreviewMirrored != isPreviewMirrored ||
-      !config.isPreviewFrameAvailable
-    ) return null
-    return createPreviewBitmapRequest(
-      config = config,
-      sessionIdentity = sessionIdentity,
-      shouldMirror = config.isPreviewMirrored,
-    )
-  }
-
-  @MainThread
-  internal fun createScreenshotRequest(mirrorMode: CameraMirrorMode): PreviewBitmapRequest? {
-    val config = _transformConfig.get()
-    val sessionIdentity = config.sessionIdentity ?: return null
-    if (!config.isPreviewFrameAvailable) return null
-    val targetMirrored = mirrorMode.isMirrored(config.isPreviewMirrored)
-    return createPreviewBitmapRequest(
-      config = config,
-      sessionIdentity = sessionIdentity,
-      shouldMirror = config.isPreviewMirrored != targetMirrored,
-    )
-  }
-
-  private fun createPreviewBitmapRequest(
-    config: PreviewTransformConfig,
-    sessionIdentity: CameraFrameTransformIdentity,
-    shouldMirror: Boolean,
-  ): PreviewBitmapRequest? {
-    val transformIdentity = config.transformIdentity ?: return null
-    val geometry = config.geometry ?: return null
-    val normalizedRotation = normalizeRotation(config.rotationDegrees)
-    val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
-    val orientedWidth = if (isQuarterTurn) config.bufferSize.height else config.bufferSize.width
-    val orientedHeight = if (isQuarterTurn) config.bufferSize.width else config.bufferSize.height
-    // getBitmap 不应用 TextureView 内容矩阵，按内容比例截图后再显式绘制到预览区域
-    val captureScale = minOf(
-      1f,
-      orientedWidth / geometry.contentSize.width,
-      orientedHeight / geometry.contentSize.height,
-    )
-    val captureSize = IntSize(
-      (geometry.contentSize.width * captureScale).roundToInt().coerceAtLeast(1),
-      (geometry.contentSize.height * captureScale).roundToInt().coerceAtLeast(1),
-    )
-    return PreviewBitmapRequest(
-      sessionIdentity = sessionIdentity,
-      transformIdentity = transformIdentity,
-      captureSize = captureSize,
-      previewSize = geometry.previewSize,
-      contentBounds = Rect(
-        geometry.offsetX,
-        geometry.offsetY,
-        geometry.offsetX + geometry.contentSize.width,
-        geometry.offsetY + geometry.contentSize.height,
-      ),
-      shouldMirror = shouldMirror,
-    )
-  }
-
-  @MainThread
-  internal fun createSampledFrame(
-    source: Bitmap,
-    request: PreviewBitmapRequest,
-  ): CameraFrame.PreviewSampled? {
-    val output = createPreviewBitmap(source, request) ?: return null
-    return CameraFrame.PreviewSampled(
-      data = output,
-      rotationDegrees = 0,
-      transformIdentity = request.transformIdentity,
-    )
-  }
-
-  @MainThread
-  internal fun createPreviewBitmap(
-    source: Bitmap,
-    request: PreviewBitmapRequest,
-  ): Bitmap? {
-    val config = _transformConfig.get()
-    if (
-      config.sessionIdentity !== request.sessionIdentity ||
-      config.transformIdentity !== request.transformIdentity ||
-      IntSize(source.width, source.height) != request.captureSize
-    ) return null
-
-    val previewBounds = Rect(0f, 0f, request.previewSize.width.toFloat(), request.previewSize.height.toFloat())
-    val isDirect = !request.shouldMirror && request.captureSize == request.previewSize &&
-      request.contentBounds == previewBounds
-    val output = if (isDirect) {
-      source
-    } else {
-      Bitmap.createBitmap(request.previewSize.width, request.previewSize.height, Bitmap.Config.ARGB_8888).also { bitmap ->
-        try {
-          Canvas(bitmap).apply {
-            if (request.shouldMirror) {
-              scale(-1f, 1f, request.previewSize.width / 2f, request.previewSize.height / 2f)
-            }
-            val destination = request.contentBounds
-            drawBitmap(
-              source,
-              null,
-              RectF(destination.left, destination.top, destination.right, destination.bottom),
-              Paint(Paint.FILTER_BITMAP_FLAG),
-            )
-          }
-        } catch (error: Throwable) {
-          bitmap.recycle()
-          throw error
-        }
+    val snapshot = _snapshot.get()
+    if (!frame.transformToken.matches(snapshot.transformIdentity)) return null
+    val geometry = snapshot.geometry ?: return null
+    val matrix = when (frame) {
+      is CameraFrame.Preview -> {
+        val rawFrame = snapshot.session?.rawFrame ?: return null
+        createRawFrameMatrix(frame, rawFrame, geometry) ?: return null
+      }
+      is CameraFrame.PreviewSampled -> {
+        if (frame.rotationDegrees != 0 || frame.dataSize != geometry.previewSize) return null
+        Matrix()
       }
     }
-    return output
+    if (snapshot.isMirrored) matrix.postScale(-1f, 1f, geometry.previewSize.width / 2f, 0f)
+    return matrix
+  }
+
+  internal val retryGeneration: Int get() = _retryGeneration.intValue
+
+  /** 最近一次开始显示的会话，停止后保留，使旧画面在新会话首帧前维持原布局 */
+  internal val displayedSession: State<PreviewSession?> = _displayedSession
+
+  @AnyThread
+  internal fun currentTransformIdentity(): CameraFrameTransformIdentity? {
+    return _snapshot.get().transformIdentity
+  }
+
+  @MainThread
+  internal fun updatePreviewLayout(previewSize: IntSize, contentScale: ContentScale, isMirrored: Boolean) {
+    publish { it.copy(previewSize = previewSize, contentScale = contentScale, isMirrored = isMirrored) }
+  }
+
+  /** 预览首帧已经上屏，开始发布坐标变换 */
+  @MainThread
+  internal fun startSession(session: PreviewSession) {
+    publish { it.copy(session = session) }
+    _displayedSession.value = session
+    _previewResolution.value = session.resolution
+    _sessionFailure = null
+    updateFailure()
+  }
+
+  @MainThread
+  internal fun clearSession(session: PreviewSession) {
+    if (_snapshot.get().session !== session) return
+    publish { it.copy(session = null) }
+    _previewResolution.value = IntSize.Zero
+  }
+
+  @MainThread
+  internal fun reportSessionFailure(error: Throwable) {
+    _sessionFailure = error
+    updateFailure()
+  }
+
+  @MainThread
+  internal fun updateDevicesFailure(error: Throwable?) {
+    _devicesFailure = error
+    updateFailure()
+  }
+
+  /**
+   * 截取当前预览区域并生成采样帧
+   *
+   * [capture] 返回预览控件显示的画面，其中包含平台镜像；[mirrorMode] 决定输出图片的镜像状态。
+   */
+  @MainThread
+  internal fun capturePreview(mirrorMode: CameraMirrorMode, capture: () -> Bitmap?): CameraFrame.PreviewSampled? {
+    val snapshot = _snapshot.get()
+    val transformIdentity = snapshot.transformIdentity ?: return null
+    val session = snapshot.session ?: return null
+    val geometry = snapshot.geometry ?: return null
+    val source = capture() ?: return null
+    val shouldMirror = mirrorMode.isMirrored(session.isPreviewMirrored) != session.isPreviewMirrored
+    return CameraFrame.PreviewSampled(
+      data = renderPreviewBitmap(source, geometry, shouldMirror),
+      rotationDegrees = 0,
+      transformIdentity = transformIdentity,
+    )
   }
 
   @MainThread
@@ -302,317 +189,69 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
-  internal fun updatePreviewLayout(
-    previewSize: IntSize,
-    contentScale: ContentScale,
-    isMirrored: Boolean,
-  ) {
-    val current = _transformConfig.get()
-    if (current.previewSize == previewSize && current.contentScale == contentScale && current.isMirrored == isMirrored) return
-    val geometry = calculatePreviewGeometry(
-      bufferSize = current.bufferSize,
-      rotationDegrees = current.rotationDegrees,
-      previewSize = previewSize,
-      contentScale = contentScale,
-    )
-    val transformChanged = current.geometry != geometry || current.contentScale != contentScale || current.isMirrored != isMirrored
-    _transformConfig.set(
-      current.copy(
-        previewSize = previewSize,
-        contentScale = contentScale,
-        geometry = geometry,
-        isMirrored = isMirrored,
-        transformIdentity = when {
-          geometry == null -> null
-          !current.isPreviewFrameAvailable -> null
-          transformChanged && current.sessionIdentity != null -> CameraFrameTransformIdentity()
-          else -> current.transformIdentity
-        },
-      ),
-    )
-    if (transformChanged) _previewTransformRevision.intValue++
-  }
-
-  @MainThread
-  internal fun beginAttempt(attemptIdentity: CameraPreviewAttemptIdentity) {
-    _attemptIdentity = attemptIdentity
-    clearSessionFailure()
-  }
-
-  @MainThread
-  internal fun beginCameraDevicesAttempt(attemptIdentity: CameraDevicesAttemptIdentity) {
-    _cameraDevicesAttemptIdentity = attemptIdentity
-    clearCameraDevicesFailureState()
-  }
-
-  @MainThread
-  internal fun reportFailure(
-    attemptIdentity: CameraPreviewAttemptIdentity,
-    error: Throwable,
-  ) {
-    if (_attemptIdentity !== attemptIdentity) return
-    _failureClearingSessionIdentity = null
-    _sessionFailure = error
-    _failureSource = CameraPreviewFailureSource.SESSION
-    _failure.value = error
-  }
-
-  @MainThread
-  internal fun reportCameraDevicesFailure(
-    attemptIdentity: CameraDevicesAttemptIdentity,
-    devicesState: CameraDevicesState,
-    error: Throwable,
-  ) {
-    if (_cameraDevicesAttemptIdentity !== attemptIdentity) return
-    _cameraDevicesFailure = ActiveCameraDevicesFailure(devicesState, error)
-    _failureSource = CameraPreviewFailureSource.CAMERA_DEVICES
-    _failure.value = error
-  }
-
-  @MainThread
-  internal fun clearCameraDevicesFailure(
-    attemptIdentity: CameraDevicesAttemptIdentity,
-    devicesState: CameraDevicesState,
-  ) {
-    if (
-      _cameraDevicesAttemptIdentity !== attemptIdentity ||
-      _cameraDevicesFailure?.devicesState !== devicesState
-    ) return
-    clearCameraDevicesFailureState()
-  }
-
-  @MainThread
-  internal fun endAttempt(attemptIdentity: CameraPreviewAttemptIdentity) {
-    if (_attemptIdentity !== attemptIdentity) return
-    _attemptIdentity = null
-    clearSessionFailure()
-  }
-
-  @MainThread
-  internal fun endCameraDevicesAttempt(attemptIdentity: CameraDevicesAttemptIdentity) {
-    if (_cameraDevicesAttemptIdentity !== attemptIdentity) return
-    _cameraDevicesAttemptIdentity = null
-    clearCameraDevicesFailureState()
-  }
-
-  @MainThread
-  internal fun startSession(
-    attemptIdentity: CameraPreviewAttemptIdentity,
-    sessionIdentity: CameraFrameTransformIdentity,
-    bufferSize: IntSize,
-    rotationDegrees: Int,
-    isPreviewMirrored: Boolean = false,
-    isMirrored: Boolean,
-  ): Boolean {
-    if (_attemptIdentity !== attemptIdentity) return false
-    startSession(
-      sessionIdentity = sessionIdentity,
-      bufferSize = bufferSize,
-      rotationDegrees = rotationDegrees,
-      isPreviewMirrored = isPreviewMirrored,
-      isMirrored = isMirrored,
-    )
-    return true
-  }
-
-  @MainThread
-  internal fun startSession(
-    sessionIdentity: CameraFrameTransformIdentity,
-    bufferSize: IntSize,
-    rotationDegrees: Int,
-    isPreviewMirrored: Boolean = false,
-    isMirrored: Boolean,
-  ) {
-    val current = _transformConfig.get()
-    val normalizedRotation = normalizeRotation(rotationDegrees)
-    _transformConfig.set(
-      current.copy(
-        sessionIdentity = sessionIdentity,
-        transformIdentity = null,
-        bufferSize = bufferSize,
-        rotationDegrees = normalizedRotation,
-        isPreviewMirrored = isPreviewMirrored,
-        isMirrored = isMirrored,
-        isPreviewFrameAvailable = false,
-        geometry = calculatePreviewGeometry(
-          bufferSize = bufferSize,
-          rotationDegrees = normalizedRotation,
-          previewSize = current.previewSize,
-          contentScale = current.contentScale,
-        ),
-      ),
-    )
-    _failureClearingSessionIdentity = sessionIdentity
-    _previewTransformRevision.intValue++
-    _previewResolution.value = bufferSize
-  }
-
-  @MainThread
-  internal fun clearSession(sessionIdentity: CameraFrameTransformIdentity? = null): Boolean {
-    val current = _transformConfig.get()
-    if (sessionIdentity != null && current.sessionIdentity !== sessionIdentity) return false
-    _failureClearingSessionIdentity = null
-    _transformConfig.set(
-      current.copy(
-        sessionIdentity = null,
-        transformIdentity = null,
-        bufferSize = IntSize.Zero,
-        rotationDegrees = 0,
-        isPreviewMirrored = false,
-        isPreviewFrameAvailable = false,
-        geometry = null,
-      ),
-    )
-    _previewTransformRevision.intValue++
-    _previewResolution.value = IntSize.Zero
-    return true
-  }
-
-  @MainThread
-  internal fun createCurrentTextureViewTransform(
-    sessionIdentity: CameraFrameTransformIdentity,
-  ): Matrix? {
-    val current = _transformConfig.get()
-    if (current.sessionIdentity !== sessionIdentity || !current.isPreviewFrameAvailable) return null
-    return current.geometry?.let { geometry ->
-      createTextureViewTransform(geometry, current.isMirrored != current.isPreviewMirrored)
-    }
-  }
-
-  @MainThread
-  internal fun markPreviewFrameAvailable(
-    sessionIdentity: CameraFrameTransformIdentity,
-  ): Matrix? {
-    val current = _transformConfig.get()
-    if (current.sessionIdentity !== sessionIdentity || current.isPreviewFrameAvailable) return null
-    _transformConfig.set(
-      current.copy(
-        transformIdentity = if (current.geometry == null) null else sessionIdentity,
-        isPreviewFrameAvailable = true,
-      ),
-    )
-    if (_failureClearingSessionIdentity === sessionIdentity) {
-      _failureClearingSessionIdentity = null
-      _sessionFailure = null
-      if (_failureSource == CameraPreviewFailureSource.SESSION) {
-        val cameraDevicesFailure = _cameraDevicesFailure
-        if (cameraDevicesFailure == null) {
-          _failureSource = null
-          _failure.value = null
-        } else {
-          _failureSource = CameraPreviewFailureSource.CAMERA_DEVICES
-          _failure.value = cameraDevicesFailure.error
-        }
-      }
-    }
-    _previewTransformRevision.intValue++
-    return current.geometry?.let { geometry ->
-      createTextureViewTransform(geometry, current.isMirrored != current.isPreviewMirrored)
-    }
-  }
-
-  @MainThread
-  internal fun calculateCurrentTextureViewTransform(
-    previewSize: IntSize,
-    contentScale: ContentScale,
-    isMirrored: Boolean,
-  ): Matrix? {
-    val current = _transformConfig.get()
-    if (!current.isPreviewFrameAvailable) return null
-    val geometry = calculatePreviewGeometry(
-      bufferSize = current.bufferSize,
-      rotationDegrees = current.rotationDegrees,
-      previewSize = previewSize,
-      contentScale = contentScale,
-    ) ?: return null
-    return createTextureViewTransform(geometry, isMirrored != current.isPreviewMirrored)
-  }
-
-  @MainThread
   internal fun reset() {
     _takeScreenshotAction = null
     _requestFocusAction = null
-    _attemptIdentity = null
-    _cameraDevicesAttemptIdentity = null
-    clearFailures()
-    _transformConfig.set(PreviewTransformConfig())
-    _previewTransformRevision.intValue++
+    _snapshot.set(PreviewSnapshot())
+    _displayedSession.value = null
     _previewResolution.value = IntSize.Zero
+    _sessionFailure = null
+    _devicesFailure = null
+    updateFailure()
     _retryGeneration.intValue = 0
   }
 
-  private fun clearFailures() {
-    _failureClearingSessionIdentity = null
-    _sessionFailure = null
-    _cameraDevicesFailure = null
-    _failureSource = null
-    _failure.value = null
+  private fun updateFailure() {
+    _failure.value = _sessionFailure ?: _devicesFailure
   }
 
-  private fun clearSessionFailure() {
-    _failureClearingSessionIdentity = null
-    _sessionFailure = null
-    if (_failureSource != CameraPreviewFailureSource.SESSION) return
-    val cameraDevicesFailure = _cameraDevicesFailure
-    if (cameraDevicesFailure == null) {
-      _failureSource = null
-      _failure.value = null
-    } else {
-      _failureSource = CameraPreviewFailureSource.CAMERA_DEVICES
-      _failure.value = cameraDevicesFailure.error
+  /** 会话、布局、缩放或镜像任一变化都会轮换 transform identity，使旧 token 失效 */
+  private fun publish(update: (PreviewSnapshot) -> PreviewSnapshot) {
+    val current = _snapshot.get()
+    val next = update(current)
+    val geometry = next.session?.let { session ->
+      calculatePreviewGeometry(session.contentSize, next.previewSize, next.contentScale)
     }
-  }
-
-  private fun clearCameraDevicesFailureState() {
-    _cameraDevicesFailure = null
-    if (_failureSource != CameraPreviewFailureSource.CAMERA_DEVICES) return
-    val sessionFailure = _sessionFailure
-    if (sessionFailure == null) {
-      _failureSource = null
-      _failure.value = null
-    } else {
-      _failureSource = CameraPreviewFailureSource.SESSION
-      _failure.value = sessionFailure
+    val isChanged = next.session !== current.session ||
+      geometry != current.geometry ||
+      next.contentScale != current.contentScale ||
+      next.isMirrored != current.isMirrored
+    val transformIdentity = when {
+      geometry == null -> null
+      isChanged -> CameraFrameTransformIdentity()
+      else -> current.transformIdentity
     }
+    _snapshot.set(next.copy(geometry = geometry, transformIdentity = transformIdentity))
   }
 }
 
-internal class CameraPreviewAttemptIdentity
-
-internal class CameraDevicesAttemptIdentity
-
-private enum class CameraPreviewFailureSource {
-  SESSION,
-  CAMERA_DEVICES,
-}
-
-private data class ActiveCameraDevicesFailure(
-  val devicesState: CameraDevicesState,
-  val error: Throwable,
+/** 一次已经上屏的相机会话 */
+internal class PreviewSession(
+  /** 预览内容旋转到显示方向后的尺寸 */
+  val contentSize: IntSize,
+  val isPreviewMirrored: Boolean,
+  val resolution: IntSize,
+  /** 原始帧的缓冲区布局，未启用原始帧处理时为 `null` */
+  val rawFrame: RawFrameLayout?,
 )
 
-private data class PreviewTransformConfig(
-  val sessionIdentity: CameraFrameTransformIdentity? = null,
+/** 原始帧缓冲区中与预览同视野的区域，以及把它转到显示方向所需的角度 */
+internal data class RawFrameLayout(
+  val bufferSize: IntSize,
+  val cropRect: IntRect,
+  val rotationDegrees: Int,
+)
+
+private data class PreviewSnapshot(
+  val session: PreviewSession? = null,
   val transformIdentity: CameraFrameTransformIdentity? = null,
-  val bufferSize: IntSize = IntSize.Zero,
-  val rotationDegrees: Int = 0,
   val previewSize: IntSize = IntSize.Zero,
   val contentScale: ContentScale = ContentScale.Crop,
-  val geometry: PreviewGeometry? = null,
-  val isPreviewMirrored: Boolean = false,
   val isMirrored: Boolean = false,
-  val isPreviewFrameAvailable: Boolean = false,
+  val geometry: PreviewGeometry? = null,
 )
 
-internal data class PreviewBitmapRequest(
-  val sessionIdentity: CameraFrameTransformIdentity,
-  val transformIdentity: CameraFrameTransformIdentity,
-  val captureSize: IntSize,
-  val previewSize: IntSize,
-  val contentBounds: Rect,
-  val shouldMirror: Boolean,
-)
-
+/** 预览内容在 Compose 区域中的位置，内容始终居中 */
 internal data class PreviewGeometry(
   val previewSize: IntSize,
   val contentSize: Size,
@@ -622,102 +261,92 @@ internal data class PreviewGeometry(
   val scaleY: Float,
 )
 
-internal fun createTextureViewTransform(
-  geometry: PreviewGeometry,
-  shouldMirror: Boolean = false,
-): Matrix {
-  val previewWidth = geometry.previewSize.width.toFloat()
-  val previewHeight = geometry.previewSize.height.toFloat()
-  val contentTransform = Matrix().apply {
-    setValues(
-      floatArrayOf(
-        geometry.contentSize.width / previewWidth, 0f, geometry.offsetX,
-        0f, geometry.contentSize.height / previewHeight, geometry.offsetY,
-        0f, 0f, 1f,
-      ),
-    )
-  }
-  if (!shouldMirror) return contentTransform
-  val mirror = Matrix().apply {
-    setValues(
-      floatArrayOf(
-        -1f, 0f, previewWidth,
-        0f, 1f, 0f,
-        0f, 0f, 1f,
-      ),
-    )
-  }
-  return Matrix().apply { setConcat(mirror, contentTransform) }
-}
-
 internal fun calculatePreviewGeometry(
-  bufferSize: IntSize,
-  rotationDegrees: Int,
+  contentSize: IntSize,
   previewSize: IntSize,
   contentScale: ContentScale,
 ): PreviewGeometry? {
-  if (
-    bufferSize.width <= 0 || bufferSize.height <= 0 ||
-    previewSize.width <= 0 || previewSize.height <= 0
-  ) {
+  if (contentSize.width <= 0 || contentSize.height <= 0 || previewSize.width <= 0 || previewSize.height <= 0) {
     return null
   }
-  val normalizedRotation = normalizeRotation(rotationDegrees)
-  val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
-  val orientedWidth = if (isQuarterTurn) bufferSize.height else bufferSize.width
-  val orientedHeight = if (isQuarterTurn) bufferSize.width else bufferSize.height
   val scale = contentScale.computeScaleFactor(
-    srcSize = Size(orientedWidth.toFloat(), orientedHeight.toFloat()),
+    srcSize = Size(contentSize.width.toFloat(), contentSize.height.toFloat()),
     dstSize = Size(previewSize.width.toFloat(), previewSize.height.toFloat()),
   )
-  val contentWidth = orientedWidth * scale.scaleX
-  val contentHeight = orientedHeight * scale.scaleY
-  if (!contentWidth.isFinite() || !contentHeight.isFinite() || contentWidth <= 0f || contentHeight <= 0f) return null
+  val width = contentSize.width * scale.scaleX
+  val height = contentSize.height * scale.scaleY
+  if (!width.isFinite() || !height.isFinite() || width <= 0f || height <= 0f) return null
   return PreviewGeometry(
     previewSize = previewSize,
-    contentSize = Size(contentWidth, contentHeight),
-    offsetX = (previewSize.width - contentWidth) / 2f,
-    offsetY = (previewSize.height - contentHeight) / 2f,
-    scaleX = contentWidth / orientedWidth,
-    scaleY = contentHeight / orientedHeight,
+    contentSize = Size(width, height),
+    offsetX = (previewSize.width - width) / 2f,
+    offsetY = (previewSize.height - height) / 2f,
+    scaleX = scale.scaleX,
+    scaleY = scale.scaleY,
   )
 }
 
-private fun createBufferToPreviewMatrix(
-  bufferSize: IntSize,
-  rotationDegrees: Int,
+/** 原始帧坐标依次经过裁剪、旋转、缩放和居中，映射到 Compose 预览区域 */
+private fun createRawFrameMatrix(
+  frame: CameraFrame.Preview,
+  rawFrame: RawFrameLayout,
   geometry: PreviewGeometry,
-): Matrix {
-  val width = bufferSize.width.toFloat()
-  val height = bufferSize.height.toFloat()
-  val scaleX = geometry.scaleX
-  val scaleY = geometry.scaleY
-  val offsetX = geometry.offsetX
-  val offsetY = geometry.offsetY
-  val values = when (rotationDegrees) {
-    0 -> floatArrayOf(
-      scaleX, 0f, offsetX,
-      0f, scaleY, offsetY,
-      0f, 0f, 1f,
+): Matrix? {
+  if (frame.width != rawFrame.bufferSize.width || frame.height != rawFrame.bufferSize.height) return null
+  if (normalizeRotation(frame.rotationDegrees) != rawFrame.rotationDegrees) return null
+  val crop = rawFrame.cropRect
+  val orientedSize = crop.size.rotate(rawFrame.rotationDegrees)
+  return createRotationMatrix(crop.width, crop.height, rawFrame.rotationDegrees).apply {
+    preTranslate(-crop.left.toFloat(), -crop.top.toFloat())
+    postScale(
+      geometry.contentSize.width / orientedSize.width,
+      geometry.contentSize.height / orientedSize.height,
     )
-    90 -> floatArrayOf(
-      0f, -scaleX, scaleX * height + offsetX,
-      scaleY, 0f, offsetY,
-      0f, 0f, 1f,
-    )
-    180 -> floatArrayOf(
-      -scaleX, 0f, scaleX * width + offsetX,
-      0f, -scaleY, scaleY * height + offsetY,
-      0f, 0f, 1f,
-    )
-    270 -> floatArrayOf(
-      0f, scaleX, offsetX,
-      -scaleY, 0f, scaleY * width + offsetY,
-      0f, 0f, 1f,
-    )
-    else -> error("Unsupported rotation: $rotationDegrees")
+    postTranslate(geometry.offsetX, geometry.offsetY)
   }
-  return Matrix().apply { setValues(values) }
+}
+
+/** 把 [width] × [height] 的区域顺时针旋转 [rotationDegrees]，结果仍从原点开始 */
+private fun createRotationMatrix(width: Int, height: Int, rotationDegrees: Int): Matrix {
+  val (translateX, translateY) = when (rotationDegrees) {
+    90 -> height to 0
+    180 -> width to height
+    270 -> 0 to width
+    else -> 0 to 0
+  }
+  return Matrix().apply {
+    setRotate(rotationDegrees.toFloat())
+    postTranslate(translateX.toFloat(), translateY.toFloat())
+  }
+}
+
+/** 把预览控件截图绘制到 Compose 预览区域并按需水平翻转，[source] 总会被回收或直接转交 */
+internal fun renderPreviewBitmap(source: Bitmap, geometry: PreviewGeometry, shouldMirror: Boolean): Bitmap {
+  val size = geometry.previewSize
+  val isDirect = !shouldMirror &&
+    source.width == size.width && source.height == size.height &&
+    geometry.offsetX == 0f && geometry.offsetY == 0f
+  if (isDirect) return source
+  return try {
+    Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).also { output ->
+      Canvas(output).apply {
+        if (shouldMirror) scale(-1f, 1f, size.width / 2f, 0f)
+        val destination = RectF(
+          geometry.offsetX,
+          geometry.offsetY,
+          geometry.offsetX + geometry.contentSize.width,
+          geometry.offsetY + geometry.contentSize.height,
+        )
+        drawBitmap(source, null, destination, Paint(Paint.FILTER_BITMAP_FLAG))
+      }
+    }
+  } finally {
+    source.recycle()
+  }
+}
+
+internal fun IntSize.rotate(rotationDegrees: Int): IntSize {
+  return if (rotationDegrees % 180 == 0) this else IntSize(height, width)
 }
 
 internal fun normalizeRotation(rotationDegrees: Int): Int {

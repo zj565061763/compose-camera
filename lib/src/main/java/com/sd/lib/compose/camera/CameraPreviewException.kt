@@ -1,9 +1,12 @@
 package com.sd.lib.compose.camera
 
+import androidx.camera.core.CameraState
+
 /** [CameraPreview] 无法选择、打开或继续使用摄像头 */
 class CameraPreviewException internal constructor(
   val reason: Reason,
   message: String,
+  /** 相机后端报告的错误码，只用于诊断 */
   val cameraErrorCode: Int? = null,
   cause: Throwable? = null,
 ) : RuntimeException(message, cause) {
@@ -36,7 +39,7 @@ internal fun cameraSelectionException(cameraId: String?): CameraPreviewException
   }
 }
 
-internal fun cameraOpenException(cameraId: Int, cause: Exception): CameraPreviewException {
+internal fun cameraOpenException(cameraId: String, cause: Exception): CameraPreviewException {
   return CameraPreviewException(
     reason = CameraPreviewException.Reason.CAMERA_OPEN_FAILED,
     message = "Failed to open or configure camera ID '$cameraId'.",
@@ -44,17 +47,17 @@ internal fun cameraOpenException(cameraId: Int, cause: Exception): CameraPreview
   )
 }
 
-internal fun cameraRuntimeException(errorCode: Int): CameraPreviewException {
+/** 相机打开后发生的错误视为运行错误，其余视为打开失败 */
+internal fun cameraStateException(type: CameraState.Type, error: CameraState.StateError): CameraPreviewException {
+  val isRuntimeError = type == CameraState.Type.OPEN || type == CameraState.Type.CLOSING
   return CameraPreviewException(
-    reason = CameraPreviewException.Reason.CAMERA_RUNTIME_ERROR,
-    message = "The camera reported runtime error code $errorCode.",
-    cameraErrorCode = errorCode,
-  )
-}
-
-internal fun nullPreviewCallbackBufferException(): CameraPreviewException {
-  return CameraPreviewException(
-    reason = CameraPreviewException.Reason.CAMERA_RUNTIME_ERROR,
-    message = "The camera returned a null preview callback buffer.",
+    reason = if (isRuntimeError) {
+      CameraPreviewException.Reason.CAMERA_RUNTIME_ERROR
+    } else {
+      CameraPreviewException.Reason.CAMERA_OPEN_FAILED
+    },
+    message = "The camera reported error code ${error.code} in state $type.",
+    cameraErrorCode = error.code,
+    cause = error.cause,
   )
 }

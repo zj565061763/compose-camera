@@ -6,8 +6,10 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 
 /** 一次枚举得到的摄像头，调用方应把 [cameraId] 视为不透明标识 */
 @Immutable
@@ -16,12 +18,6 @@ data class CameraDeviceInfo(
   val lens: CameraLens?,
 )
 
-internal sealed interface CameraDevicesRefreshEvent {
-  data object Success : CameraDevicesRefreshEvent
-
-  data class Failure(val error: Throwable) : CameraDevicesRefreshEvent
-}
-
 /** 可用摄像头列表及其加载状态 */
 @Stable
 class CameraDevicesState internal constructor() {
@@ -29,9 +25,8 @@ class CameraDevicesState internal constructor() {
   private val _isLoading = mutableStateOf(true)
   private val _hasLoadedDevices = mutableStateOf(false)
   private val _error = mutableStateOf<Throwable?>(null)
+  private val _refreshVersion = mutableIntStateOf(0)
   private var _refreshAction: (() -> Unit)? = null
-  private var _latestRefreshEvent: CameraDevicesRefreshEvent? = null
-  private val _refreshListeners = linkedSetOf<(CameraDevicesRefreshEvent) -> Unit>()
 
   /** 最近一次枚举到的摄像头 */
   val devices: State<List<CameraDeviceInfo>> = _devices
@@ -44,6 +39,9 @@ class CameraDevicesState internal constructor() {
 
   internal val hasLoadedDevices: State<Boolean> = _hasLoadedDevices
 
+  /** 每次枚举完成都会递增，连续失败使用同一个异常实例时也能被观察到 */
+  internal val refreshVersion: State<Int> = _refreshVersion
+
   /** 主动重新读取摄像头列表 */
   @MainThread
   fun refresh() {
@@ -55,20 +53,6 @@ class CameraDevicesState internal constructor() {
     _refreshAction = action
   }
 
-  /** 返回订阅前最近完成的刷新事件，由订阅者完成一次补发 */
-  @MainThread
-  internal fun addRefreshListener(
-    listener: (CameraDevicesRefreshEvent) -> Unit,
-  ): CameraDevicesRefreshEvent? {
-    _refreshListeners += listener
-    return _latestRefreshEvent
-  }
-
-  @MainThread
-  internal fun removeRefreshListener(listener: (CameraDevicesRefreshEvent) -> Unit) {
-    _refreshListeners -= listener
-  }
-
   @MainThread
   internal fun beginRefresh() {
     _isLoading.value = true
@@ -77,21 +61,20 @@ class CameraDevicesState internal constructor() {
   @MainThread
   internal fun publishDevices(devices: List<CameraDeviceInfo>) {
     _devices.value = devices
-    _isLoading.value = false
     _hasLoadedDevices.value = true
     _error.value = null
-    val event = CameraDevicesRefreshEvent.Success
-    _latestRefreshEvent = event
-    notifyListeners(_refreshListeners.toList(), event)
+    finishRefresh()
   }
 
   @MainThread
   internal fun publishError(error: Throwable) {
-    _isLoading.value = false
     _error.value = error
-    val event = CameraDevicesRefreshEvent.Failure(error)
-    _latestRefreshEvent = event
-    notifyListeners(_refreshListeners.toList(), event)
+    finishRefresh()
+  }
+
+  private fun finishRefresh() {
+    _isLoading.value = false
+    _refreshVersion.intValue++
   }
 }
 
@@ -103,10 +86,11 @@ class CameraDevicesState internal constructor() {
  */
 @Composable
 fun rememberCameraDevicesState(): CameraDevicesState {
+  val context = LocalContext.current.applicationContext
   val state = remember { CameraDevicesState() }
 
-  DisposableEffect(state) {
-    val loader = CameraDevicesLoader(state)
+  DisposableEffect(state, context) {
+    val loader = CameraDevicesLoader(state, CameraXDevicesSource(context))
     state.attachRefreshAction(loader::refresh)
     loader.refresh()
 
@@ -116,17 +100,4 @@ fun rememberCameraDevicesState(): CameraDevicesState {
     }
   }
   return state
-}
-
-/** 一个订阅者的普通异常不能阻止同一事件送达其他订阅者 */
-private fun <T> notifyListeners(listeners: List<(T) -> Unit>, value: T) {
-  var firstFailure: Exception? = null
-  listeners.forEach { listener ->
-    try {
-      listener(value)
-    } catch (error: Exception) {
-      firstFailure = mergeFailures(firstFailure, error)
-    }
-  }
-  firstFailure?.also { throw it }
 }

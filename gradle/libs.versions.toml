@@ -10,6 +10,8 @@ composeCompiler = "1.5.15"
 
 lifecycle = "2.8.7"
 
+camerax = "1.5.3"
+
 maven-publish = "0.32.0"
 
 [libraries]
@@ -24,6 +26,11 @@ androidx-compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4
 androidx-activity-compose = "androidx.activity:activity-compose:1.9.3"
 androidx-lifecycle-viewmodelCompose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
 androidx-lifecycle-runtimeCompose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
+
+androidx-camera-core = { module = "androidx.camera:camera-core", version.ref = "camerax" }
+androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
+androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
+androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
 
 junit = "junit:junit:4.13.2"
 truth = "com.google.truth:truth:1.4.4"

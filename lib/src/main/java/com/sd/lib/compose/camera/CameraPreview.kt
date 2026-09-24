@@ -6,9 +6,9 @@ import android.hardware.display.DisplayManager
 import android.os.Handler
 import android.os.Looper
 import android.view.Surface
-import android.view.TextureView
 import android.view.View
-import androidx.annotation.MainThread
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -21,16 +21,20 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 
 /**
  * Compose 摄像头预览
@@ -61,37 +65,27 @@ fun CameraPreview(
       "displayRotation must be a Surface.ROTATION_* value."
     }
   }
+  val context = LocalContext.current
   val lifecycleOwner = LocalLifecycleOwner.current
-  val autoFocusOperationsFactory = LocalCameraAutoFocusOperationsFactory.current
-  var textureView by remember { mutableStateOf<CameraTextureView?>(null) }
-
-  val currentFrameProcessor by rememberUpdatedState(frameProcessor)
   val currentOnError by rememberUpdatedState(onError)
-  val currentMirrorMode by rememberUpdatedState(mirrorMode)
+  val currentFrameProcessor by rememberUpdatedState(frameProcessor)
   val errorDispatcher = remember { MainThreadErrorDispatcher { error -> currentOnError(error) } }
-  val runtimeStore = remember { CameraPreviewRuntimeStore() }
-  var isLifecycleDestroyed by remember(lifecycleOwner) {
-    mutableStateOf(lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED)
-  }
-  val frameProcessorMode = frameProcessor.mode
+  val analysisExecutor = remember { CameraAnalysisExecutor() }
+  var previewView by remember { mutableStateOf<PreviewView?>(null) }
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
-  // 布局变化不重建 Controller，发布最新有效尺寸供下次开会话读取
-  val latestPreviewViewSize = remember { AtomicReference(IntSize.Zero) }
-  var activePreviewMirrored by remember { mutableStateOf<Boolean?>(null) }
+  val currentPreviewSize by rememberUpdatedState(previewSize)
 
-  val cameraDevices by devicesState.devices
-  val hasLoadedCameraDevices by devicesState.hasLoadedDevices
-  val selectedDevice = cameraDevices.selectedCameraDevice(cameraId)
-  val cameraDeviceKey = selectedDevice?.cameraId
-  val cameraPreviewMirrored = activePreviewMirrored ?: (selectedDevice?.lens == CameraLens.FRONT)
-  val targetMirrored = mirrorMode.isMirrored(cameraPreviewMirrored)
+  val devices by devicesState.devices
+  val hasLoadedDevices by devicesState.hasLoadedDevices
+  val devicesRefreshVersion by devicesState.refreshVersion
+  val selectedDevice = if (cameraId == null) devices.firstOrNull() else devices.firstOrNull { it.cameraId == cameraId }
+  val displayedSession by state.displayedSession
+  // 会话上屏前按镜头方向预估平台镜像
+  val isPreviewMirrored = displayedSession?.isPreviewMirrored ?: (selectedDevice?.lens == CameraLens.FRONT)
+  val targetMirrored = mirrorMode.isMirrored(isPreviewMirrored)
   val effectiveDisplayRotation = displayRotation ?: rememberDisplayRotation()
-  val hasValidPreviewSize = previewSize.width > 0 && previewSize.height > 0
-
   val retryGeneration = state.retryGeneration
-  LaunchedEffect(devicesState, retryGeneration) {
-    if (retryGeneration != 0) devicesState.refresh()
-  }
+  val hasValidPreviewSize = previewSize.width > 0 && previewSize.height > 0
 
   SideEffect {
     state.updatePreviewLayout(previewSize, contentScale, targetMirrored)
@@ -101,324 +95,145 @@ fun CameraPreview(
     onDispose { state.reset() }
   }
 
-  DisposableEffect(runtimeStore) {
-    onDispose { runtimeStore.close() }
-  }
-
-  DisposableEffect(runtimeStore, lifecycleOwner) {
-    val observer = LifecycleEventObserver { _, event ->
-      if (event == Lifecycle.Event.ON_DESTROY) {
-        isLifecycleDestroyed = true
-        runtimeStore.closeCurrentRuntime()
-      }
-    }
-    lifecycleOwner.lifecycle.addObserver(observer)
-    if (lifecycleOwner.lifecycle.currentState == Lifecycle.State.DESTROYED) {
-      isLifecycleDestroyed = true
-      runtimeStore.closeCurrentRuntime()
-    }
+  DisposableEffect(errorDispatcher, analysisExecutor) {
     onDispose {
-      lifecycleOwner.lifecycle.removeObserver(observer)
+      errorDispatcher.close()
+      analysisExecutor.close()
     }
   }
 
-  val currentTextureView = textureView
-  val attemptIdentity = remember(
-    lifecycleOwner,
-    autoFocusOperationsFactory,
-    state,
-    devicesState,
-    cameraId,
-    effectiveDisplayRotation,
-    frameProcessorMode,
-    retryGeneration,
-    hasLoadedCameraDevices,
-    cameraDeviceKey,
-  ) { CameraPreviewAttemptIdentity() }
-  val failureDispatcher = remember(state, attemptIdentity) {
-    MainThreadErrorDispatcher { error -> state.reportFailure(attemptIdentity, error) }
-  }
-  // 设备枚举故障跨普通相机会话重建保留，只在设备状态或 retry 变化时失效
-  val cameraDevicesAttemptIdentity = remember(state, devicesState, retryGeneration) {
-    CameraDevicesAttemptIdentity()
-  }
-  val cameraDevicesRefreshDispatcher = remember(state, devicesState, cameraDevicesAttemptIdentity) {
-    MainThreadCameraDevicesRefreshDispatcher { event ->
-      when (event) {
-        CameraDevicesRefreshEvent.Success -> {
-          state.clearCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState)
-        }
-        is CameraDevicesRefreshEvent.Failure -> {
-          state.reportCameraDevicesFailure(cameraDevicesAttemptIdentity, devicesState, event.error)
-        }
-      }
-    }
-  }
-  val currentCameraDevicesRefreshDispatcher by rememberUpdatedState(cameraDevicesRefreshDispatcher)
-
-  DisposableEffect(state, cameraDevicesAttemptIdentity) {
-    state.beginCameraDevicesAttempt(cameraDevicesAttemptIdentity)
-    onDispose { state.endCameraDevicesAttempt(cameraDevicesAttemptIdentity) }
+  LaunchedEffect(devicesState, retryGeneration) {
+    if (retryGeneration != 0) devicesState.refresh()
   }
 
-  DisposableEffect(state, attemptIdentity) {
-    state.beginAttempt(attemptIdentity)
-    onDispose { state.endAttempt(attemptIdentity) }
+  LaunchedEffect(state, devicesState, devicesRefreshVersion) {
+    val error = devicesState.error.value
+    state.updateDevicesFailure(error)
+    error?.also(errorDispatcher::dispatch)
   }
 
-  DisposableEffect(state, devicesState, errorDispatcher) {
-    val errorSubscription = MainThreadErrorSubscription(errorDispatcher)
-    val refreshListener: (CameraDevicesRefreshEvent) -> Unit = { event ->
-      currentCameraDevicesRefreshDispatcher.dispatch(event)
-      if (event is CameraDevicesRefreshEvent.Failure) errorSubscription.dispatch(event.error)
-    }
-    devicesState.addRefreshListener(refreshListener)?.also(refreshListener)
-    onDispose {
-      errorSubscription.close()
-      devicesState.removeRefreshListener(refreshListener)
-    }
-  }
-
+  val currentPreviewView = previewView
   DisposableEffect(
-    currentTextureView,
+    currentPreviewView,
     hasValidPreviewSize,
-    isLifecycleDestroyed,
-    attemptIdentity,
-  ) {
-    if (currentTextureView == null || !hasValidPreviewSize || !hasLoadedCameraDevices || isLifecycleDestroyed) {
-      onDispose { }
-    } else {
-      val failureSubscription = MainThreadErrorSubscription(failureDispatcher)
-      val runtimeLease = try {
-        runtimeStore.acquire()
-      } catch (error: Throwable) {
-        throwAfterCleanup(error, listOf(failureSubscription::close))
-      }
-      val controller = try {
-        CameraPreviewController(
-          runtimeLease = runtimeLease,
-          lifecycleOwner = lifecycleOwner,
-          textureView = currentTextureView,
-          cameraId = cameraId,
-          displayRotation = effectiveDisplayRotation,
-          previewViewSizeProvider = latestPreviewViewSize::get,
-          transformIdentityProvider = state::currentTransformIdentity,
-          onSessionStarted = { sessionIdentity, bufferSize, rotationDegrees, isPreviewMirrored ->
-            val started = state.startSession(
-              attemptIdentity = attemptIdentity,
-              sessionIdentity = sessionIdentity,
-              bufferSize = bufferSize,
-              rotationDegrees = rotationDegrees,
-              isPreviewMirrored = isPreviewMirrored,
-              isMirrored = currentMirrorMode.isMirrored(isPreviewMirrored),
-            )
-            if (started) activePreviewMirrored = isPreviewMirrored
-            started
-          },
-          onPreviewFrameAvailable = { sessionIdentity ->
-            state.markPreviewFrameAvailable(sessionIdentity)?.also(currentTextureView::setTransform)
-          },
-          frameProcessor = when (frameProcessorMode) {
-            FrameProcessorMode.NONE -> ActiveFrameProcessor.None
-            FrameProcessorMode.PREVIEW -> ActiveFrameProcessor.Preview { frame ->
-              (currentFrameProcessor as? FrameProcessor.Preview)?.onFrame?.invoke(frame)
-            }
-            FrameProcessorMode.PREVIEW_SAMPLED -> ActiveFrameProcessor.PreviewSampled(
-              intervalMillis = {
-                (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.intervalMillis ?: Long.MAX_VALUE
-              },
-              onFrame = { frame ->
-                (currentFrameProcessor as? FrameProcessor.PreviewSampled)?.onFrame?.invoke(frame)
-              },
-            )
-          },
-          captureSampledFrame = { sessionIdentity, isPreviewMirrored ->
-            capturePreviewSampledFrame(
-              state = state,
-              sessionIdentity = sessionIdentity,
-              isPreviewMirrored = isPreviewMirrored,
-              captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
-            )
-          },
-          onSessionFailure = failureSubscription::dispatch,
-          onError = errorDispatcher::dispatch,
-          onSessionClosed = { sessionIdentity ->
-            if (state.clearSession(sessionIdentity)) activePreviewMirrored = null
-          },
-          autoFocusOperationsFactory = autoFocusOperationsFactory,
-        )
-      } catch (error: Throwable) {
-        throwAfterCleanup(error, listOf(failureSubscription::close, runtimeLease::close))
-      }
-      val requestFocusAction: () -> Unit = controller::requestFocus
-      try {
-        controller.start()
-        state.attachRequestFocusAction(requestFocusAction)
-        onDispose {
-          runCleanupActions(
-            actions = listOf(
-              { state.detachRequestFocusAction(requestFocusAction) },
-              failureSubscription::close,
-            ),
-            finalAction = controller::close,
-          )?.also(errorDispatcher::dispatch)
-        }
-      } catch (error: Throwable) {
-        throwAfterCleanup(
-          error,
-          listOf(
-            { state.detachRequestFocusAction(requestFocusAction) },
-            failureSubscription::close,
-            controller::close,
-          ),
-        )
-      }
-    }
-  }
-
-  DisposableEffect(state, currentTextureView, errorDispatcher) {
-    if (currentTextureView == null) {
-      onDispose { }
-    } else {
-      val takeScreenshotAction: (CameraMirrorMode) -> Bitmap? = { screenshotMirrorMode ->
-        try {
-          capturePreviewScreenshot(
-            state = state,
-            mirrorMode = screenshotMirrorMode,
-            captureBitmap = { width, height -> captureTextureViewBitmap(currentTextureView, width, height) },
-          )
-        } catch (error: Exception) {
-          errorDispatcher.dispatch(error)
-          null
-        }
-      }
-      state.attachTakeScreenshotAction(takeScreenshotAction)
-      onDispose { state.detachTakeScreenshotAction(takeScreenshotAction) }
-    }
-  }
-
-  CameraPreviewTextureView(
-    modifier = modifier,
-    state = state,
-    previewSize = previewSize,
-    contentScale = contentScale,
-    targetMirrored = targetMirrored,
-    onTextureViewCreated = { view -> textureView = view },
-    onSizeChanged = { size ->
-      if (size.width > 0 && size.height > 0) latestPreviewViewSize.set(size)
-      previewSize = size
-      state.updatePreviewLayout(size, contentScale, targetMirrored)
-      // 对已显示的会话同步更新矩阵，避免尺寸变化当帧仍使用旧值
-      state.calculateCurrentTextureViewTransform(size, contentScale, targetMirrored)?.also { transform ->
-        textureView?.setTransform(transform)
-      }
-    },
-  )
-}
-
-@Composable
-private fun CameraPreviewTextureView(
-  modifier: Modifier,
-  state: CameraPreviewState,
-  previewSize: IntSize,
-  contentScale: ContentScale,
-  targetMirrored: Boolean,
-  onTextureViewCreated: (CameraTextureView) -> Unit,
-  onSizeChanged: (IntSize) -> Unit,
-) {
-  val previewTransformRevision = state.previewTransformRevision
-  val textureTransform = remember(
+    hasLoadedDevices,
+    lifecycleOwner,
     state,
-    previewTransformRevision,
-    previewSize,
-    contentScale,
-    targetMirrored,
+    cameraId,
+    selectedDevice?.cameraId,
+    effectiveDisplayRotation,
+    frameProcessor.mode,
+    retryGeneration,
   ) {
-    state.calculateCurrentTextureViewTransform(previewSize, contentScale, targetMirrored)
+    if (currentPreviewView == null || !hasValidPreviewSize || !hasLoadedDevices) {
+      return@DisposableEffect onDispose { }
+    }
+    val session = CameraSession(
+      context = context,
+      lifecycleOwner = lifecycleOwner,
+      previewView = currentPreviewView,
+      state = state,
+      config = CameraSessionConfig(
+        cameraId = cameraId,
+        displayRotation = effectiveDisplayRotation,
+        frameMode = frameProcessor.mode,
+        previewViewSize = currentPreviewSize,
+      ),
+      frameProcessor = { currentFrameProcessor },
+      analysisExecutor = analysisExecutor,
+      // retry() 之后旧会话的迟到故障不再写入状态
+      onFailure = { error -> if (state.retryGeneration == retryGeneration) state.reportSessionFailure(error) },
+      onError = errorDispatcher::dispatch,
+    )
+    session.start()
+    val requestFocus: () -> Unit = session::requestFocus
+    state.attachRequestFocusAction(requestFocus)
+    onDispose {
+      state.detachRequestFocusAction(requestFocus)
+      session.close()
+    }
   }
-  AndroidView(
-    factory = { context ->
-      CameraTextureView(context).also { view ->
-        view.isOpaque = false
-        onTextureViewCreated(view)
+
+  DisposableEffect(state, currentPreviewView) {
+    if (currentPreviewView == null) return@DisposableEffect onDispose { }
+    val takeScreenshot: (CameraMirrorMode) -> Bitmap? = { screenshotMirrorMode ->
+      try {
+        state.capturePreview(screenshotMirrorMode, currentPreviewView::getBitmap)?.data
+      } catch (error: Exception) {
+        errorDispatcher.dispatch(error)
+        null
       }
-    },
-    update = { view -> textureTransform?.also(view::setTransform) },
+    }
+    state.attachTakeScreenshotAction(takeScreenshot)
+    onDispose { state.detachTakeScreenshotAction(takeScreenshot) }
+  }
+
+  Box(
     modifier = modifier
       .clipToBounds()
-      .onSizeChanged(onSizeChanged),
-  )
-}
-
-private const val TEXTURE_VIEW_COPY_MARKER = 0x01010203
-
-@MainThread
-internal fun captureTextureViewBitmap(textureView: TextureView, width: Int, height: Int): Bitmap? {
-  if (!textureView.isAvailable || width <= 0 || height <= 0) return null
-  val bitmap = Bitmap.createBitmap(
-    textureView.resources.displayMetrics,
-    width,
-    height,
-    Bitmap.Config.ARGB_8888,
-  )
-  return copyIntoBitmapOrThrow(bitmap) { destination -> textureView.getBitmap(destination) }
-}
-
-internal fun copyIntoBitmapOrThrow(
-  bitmap: Bitmap,
-  copyInto: (Bitmap) -> Unit,
-): Bitmap {
-  val markerX = bitmap.width / 2
-  val markerY = bitmap.height / 2
-  bitmap.setPixel(markerX, markerY, TEXTURE_VIEW_COPY_MARKER)
-  val storedMarker = bitmap.getPixel(markerX, markerY)
-  var succeeded = false
-  return try {
-    copyInto(bitmap)
-    check(bitmap.getPixel(markerX, markerY) != storedMarker) {
-      "TextureView failed to copy its content into the bitmap."
-    }
-    succeeded = true
-    bitmap
-  } finally {
-    if (!succeeded) bitmap.recycle()
+      .onSizeChanged { size ->
+        previewSize = size
+        // 在当次布局同步更新坐标快照，不等下一次重组
+        state.updatePreviewLayout(size, contentScale, targetMirrored)
+      },
+  ) {
+    AndroidView(
+      factory = { viewContext ->
+        PreviewView(viewContext).apply {
+          // TextureView 实现才支持自定义旋转、截图和父布局裁剪
+          implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+          scaleType = PreviewView.ScaleType.FILL_CENTER
+        }.also { previewView = it }
+      },
+      modifier = Modifier.previewContent(
+        contentSize = displayedSession?.contentSize,
+        contentScale = contentScale,
+        isFlipped = targetMirrored != isPreviewMirrored,
+      ),
+    )
   }
 }
 
-@MainThread
-internal fun capturePreviewSampledFrame(
-  state: CameraPreviewState,
-  sessionIdentity: CameraFrameTransformIdentity,
-  isPreviewMirrored: Boolean,
-  captureBitmap: (Int, Int) -> Bitmap?,
-): CameraFrame.PreviewSampled? {
-  val request = state.createPreviewSampleRequest(sessionIdentity, isPreviewMirrored) ?: return null
-  val source = captureBitmap(request.captureSize.width, request.captureSize.height) ?: return null
-  var sourceTransferred = false
-  return try {
-    state.createSampledFrame(source, request).also { frame ->
-      sourceTransferred = frame?.data === source
-    }
-  } finally {
-    if (!sourceTransferred) source.recycle()
+/**
+ * 按 [contentScale] 把预览控件放到内容区域
+ *
+ * 控件保持相机内容的宽高比，因此 `PreviewView` 不会再裁剪或留边；非等比缩放和额外镜像通过图层完成。
+ */
+private fun Modifier.previewContent(
+  contentSize: IntSize?,
+  contentScale: ContentScale,
+  isFlipped: Boolean,
+): Modifier = layout { measurable, constraints ->
+  val flipScaleX = if (isFlipped) -1f else 1f
+  val geometry = if (constraints.hasBoundedWidth && constraints.hasBoundedHeight && contentSize != null) {
+    calculatePreviewGeometry(contentSize, IntSize(constraints.maxWidth, constraints.maxHeight), contentScale)
+  } else {
+    null
   }
-}
-
-@MainThread
-internal fun capturePreviewScreenshot(
-  state: CameraPreviewState,
-  mirrorMode: CameraMirrorMode,
-  captureBitmap: (Int, Int) -> Bitmap?,
-): Bitmap? {
-  val request = state.createScreenshotRequest(mirrorMode) ?: return null
-  val source = captureBitmap(request.captureSize.width, request.captureSize.height) ?: return null
-  var sourceTransferred = false
-  return try {
-    state.createPreviewBitmap(source, request).also { bitmap ->
-      sourceTransferred = bitmap === source
+  if (geometry == null || contentSize == null) {
+    val fillConstraints = if (constraints.hasBoundedWidth && constraints.hasBoundedHeight) {
+      Constraints.fixed(constraints.maxWidth, constraints.maxHeight)
+    } else {
+      constraints
     }
-  } finally {
-    if (!sourceTransferred) source.recycle()
+    val placeable = measurable.measure(fillConstraints)
+    layout(placeable.width, placeable.height) {
+      placeable.placeWithLayer(0, 0) { scaleX = flipScaleX }
+    }
+  } else {
+    val placeable = measurable.measure(
+      Constraints.fixed(
+        width = (contentSize.width * geometry.scaleX).roundToInt().coerceAtLeast(1),
+        height = (contentSize.height * geometry.scaleX).roundToInt().coerceAtLeast(1),
+      ),
+    )
+    layout(constraints.maxWidth, constraints.maxHeight) {
+      placeable.placeWithLayer(geometry.offsetX.roundToInt(), geometry.offsetY.roundToInt()) {
+        transformOrigin = TransformOrigin(0.5f, 0f)
+        scaleX = flipScaleX
+        scaleY = geometry.scaleY / geometry.scaleX
+      }
+    }
   }
 }
 
@@ -460,49 +275,43 @@ private fun rememberDisplayRotation(): Int {
   return rotation
 }
 
-/** 始终排入主线程队列，使用户回调位于所有库内部 try/catch 之外 */
+/** 始终排入主线程队列，使用户回调位于库内部 try/catch 之外；关闭后丢弃尚未送达的错误 */
 internal class MainThreadErrorDispatcher(
   private val onError: (Throwable) -> Unit,
-) {
-  private val _handler = Handler(Looper.getMainLooper())
-
-  fun dispatch(error: Throwable) {
-    _handler.post { onError(error) }
-  }
-
-  fun dispatchWhile(error: Throwable, isActive: () -> Boolean) {
-    _handler.post {
-      if (isActive()) onError(error)
-    }
-  }
-}
-
-/** 始终按完成顺序把设备刷新事件排入主线程队列 */
-internal class MainThreadCameraDevicesRefreshDispatcher(
-  private val onEvent: (CameraDevicesRefreshEvent) -> Unit,
-) {
-  private val _handler = Handler(Looper.getMainLooper())
-
-  fun dispatch(event: CameraDevicesRefreshEvent) {
-    _handler.post { onEvent(event) }
-  }
-}
-
-/** 退出组合后丢弃已经排入主线程队列的设备错误 */
-internal class MainThreadErrorSubscription(
-  private val dispatcher: MainThreadErrorDispatcher,
 ) : AutoCloseable {
-  private var _isActive = true
+  private val _handler = Handler(Looper.getMainLooper())
+
+  @Volatile
+  private var _closed = false
 
   fun dispatch(error: Throwable) {
-    dispatcher.dispatchWhile(error) { _isActive }
+    _handler.post { if (!_closed) onError(error) }
   }
 
   override fun close() {
-    _isActive = false
+    _closed = true
   }
 }
 
-private fun List<CameraDeviceInfo>.selectedCameraDevice(cameraId: String?): CameraDeviceInfo? {
-  return if (cameraId == null) firstOrNull() else firstOrNull { device -> device.cameraId == cameraId }
+internal const val CAMERA_ANALYSIS_THREAD_NAME = "CameraPreview-Analysis"
+
+/** 在首个任务到达时创建 `CameraPreview-Analysis` 单线程，关闭后丢弃新任务 */
+internal class CameraAnalysisExecutor : Executor, AutoCloseable {
+  private var _executor: ExecutorService? = null
+  private var _closed = false
+
+  @Synchronized
+  override fun execute(command: Runnable) {
+    if (_closed) return
+    val executor = _executor ?: Executors.newSingleThreadExecutor { runnable ->
+      Thread(runnable, CAMERA_ANALYSIS_THREAD_NAME)
+    }.also { _executor = it }
+    executor.execute(command)
+  }
+
+  @Synchronized
+  override fun close() {
+    _closed = true
+    _executor?.shutdown()
+  }
 }

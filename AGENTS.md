@@ -12,7 +12,7 @@
 - 修改 `lib` 前必须完整阅读 `REVIEW_NOTES.md`，涉及相机生命周期、设备枚举、错误转发、帧回调、预览尺寸、旋转、镜像或坐标转换时尤其如此。
 - `REVIEW_NOTES.md` 是行为不变量和回归测试清单的权威记录，修改行为时同步更新。
 - 未经用户明确要求，不得修改 `README.md`；公开行为、示例或依赖发生变化时也只检查影响，不主动更新该文件。
-- 当前内部使用 Android 平台相机 API，公开 API 不得暴露具体后端类型。
+- 当前内部使用 CameraX，公开 API 不得暴露具体后端类型。
 
 ## 构建环境
 
@@ -22,11 +22,13 @@
 | JDK | 17 |
 | Android Gradle Plugin | 8.7.3 |
 | Kotlin | 1.9.25 |
+| CameraX | 1.5.3 |
 | `compileSdk`（`app` 与 `lib`） | 35 |
 | `targetSdk`（`app`） | 35 |
 | `minSdk`（`app` 与 `lib`） | 23 |
 
 - 插件和依赖版本集中在 `gradle/libs.versions.toml`。
+- 保持 Kotlin 1.9，不升级到 Kotlin 2.x；CameraX 固定为 1.5.3，不升级到要求 Kotlin 2.x 的版本。
 - 仓库解析依赖时会先检查 `mavenLocal()`。
 
 ## 常用命令
