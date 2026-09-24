@@ -59,7 +59,7 @@ internal fun awaitThreadTerminationUninterruptibly(thread: Thread) {
   if (interrupted) Thread.currentThread().interrupt()
 }
 
-/** 尝试全部清理操作，汇总普通异常并在完成后重新抛出致命错误。 */
+/** 尝试全部清理操作，汇总普通异常并在完成后重新抛出致命错误 */
 internal fun runCleanupActions(
   actions: List<() -> Unit>,
   finalAction: () -> Unit,

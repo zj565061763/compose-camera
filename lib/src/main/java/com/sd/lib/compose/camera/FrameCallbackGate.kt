@@ -3,7 +3,7 @@ package com.sd.lib.compose.camera
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-/** 原子控制帧回调准入，并等待已经准入的同步回调完成。 */
+/** 原子控制帧回调准入，并等待已经准入的同步回调完成 */
 internal class FrameCallbackGate {
   private val _lock = ReentrantLock()
   private val _idle = _lock.newCondition()

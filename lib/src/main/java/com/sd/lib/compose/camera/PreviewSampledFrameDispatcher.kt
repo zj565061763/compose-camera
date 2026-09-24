@@ -7,7 +7,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
 import java.util.concurrent.atomic.AtomicReference
 
-/** 由预览帧节拍触发截图，并在分析线程同步发布最新采样帧。 */
+/** 由预览帧节拍触发截图，并在分析线程同步发布最新采样帧 */
 internal class PreviewSampledFrameDispatcher(
   private val mainHandler: Handler,
   private val intervalMillis: () -> Long,
@@ -24,7 +24,7 @@ internal class PreviewSampledFrameDispatcher(
   private val _analysisCoordinator = analysisCoordinator ?: CameraAnalysisCoordinator()
   private val _ownsAnalysisCoordinator = analysisCoordinator == null
   private val _callbackGate = FrameCallbackGate()
-  // coordinator 只调度票据，主线程截图开始时才取得这里的最新请求。
+  // coordinator 只调度票据，主线程截图开始时才取得这里的最新请求
   private val _pending = AtomicReference<PendingSampledFrame?>()
   private var _started = false
   private var _closed = false
@@ -149,7 +149,7 @@ internal class PreviewSampledFrameDispatcher(
   }
 }
 
-/** 中断时取消未执行的截图；已经执行时等待并回收结果。 */
+/** 中断时取消未执行的截图；已经执行时等待并回收结果 */
 private fun captureSampledFrameOnHandlerThread(
   handler: Handler,
   onInterrupted: (() -> Unit)?,
@@ -186,7 +186,7 @@ private fun captureSampledFrameOnHandlerThread(
   }
 }
 
-/** 只允许在 action 开始前取消，避免丢失执行中的结果。 */
+/** 只允许在 action 开始前取消，避免丢失执行中的结果 */
 private class CancellableHandlerFutureTask<T>(action: () -> T) : FutureTask<T>(action) {
   private val _startLock = Any()
   private var _started = false

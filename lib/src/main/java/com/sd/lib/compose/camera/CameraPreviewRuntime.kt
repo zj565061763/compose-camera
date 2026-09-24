@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 internal const val CAMERA_OPERATION_THREAD_NAME = "CameraPreview-Camera"
 
-/** 在同一个组合预览内复用 Runtime，并在当前 Lifecycle 销毁后按需创建新实例。 */
+/** 在同一个组合预览内复用 Runtime，并在当前 Lifecycle 销毁后按需创建新实例 */
 internal class CameraPreviewRuntimeStore(
   private val runtimeFactory: () -> CameraPreviewRuntime = { CameraPreviewRuntime() },
 ) : AutoCloseable {

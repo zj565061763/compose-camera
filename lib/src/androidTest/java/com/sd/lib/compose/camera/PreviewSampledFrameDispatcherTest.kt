@@ -205,7 +205,7 @@ class PreviewSampledFrameDispatcherTest {
       dispatcher.offer(latestIdentity, isPreviewMirrored = false)
 
       checkNotNull(analysisThread.get()).interrupt()
-      // 等待已进入中断处理分支，避免截图完成与 FutureTask.get() 的中断检查竞争。
+      // 等待已进入中断处理分支，避免截图完成与 FutureTask.get() 的中断检查竞争
       assertThat(captureWaitInterrupted.await(5, TimeUnit.SECONDS)).isTrue()
       releaseInterruptedCapture.countDown()
 

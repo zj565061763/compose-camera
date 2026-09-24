@@ -10,7 +10,7 @@ sealed interface FrameProcessor {
     val onFrame: (CameraFrame.Preview) -> Unit,
   ) : FrameProcessor
 
-  /** 按指定间隔从预览区域截图，间隔必须大于零。 */
+  /** 按指定间隔从预览区域截图，间隔必须大于零 */
   class PreviewSampled(
     val intervalMillis: Long,
     val onFrame: (CameraFrame.PreviewSampled) -> Unit,

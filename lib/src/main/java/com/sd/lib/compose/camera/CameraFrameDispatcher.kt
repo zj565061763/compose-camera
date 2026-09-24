@@ -2,7 +2,7 @@ package com.sd.lib.compose.camera
 
 import android.graphics.ImageFormat
 
-/** 单线程发布最新 NV21 帧，并在处理完成或被替换时归还回调缓冲区。 */
+/** 单线程发布最新 NV21 帧，并在处理完成或被替换时归还回调缓冲区 */
 internal class CameraFrameDispatcher(
   private val onFrame: (CameraFrame.Preview) -> Unit,
   private val onError: (Throwable) -> Unit,

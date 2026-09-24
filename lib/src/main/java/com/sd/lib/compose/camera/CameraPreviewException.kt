@@ -1,6 +1,6 @@
 package com.sd.lib.compose.camera
 
-/** [CameraPreview] 无法选择、打开或继续使用摄像头。 */
+/** [CameraPreview] 无法选择、打开或继续使用摄像头 */
 class CameraPreviewException internal constructor(
   val reason: Reason,
   message: String,

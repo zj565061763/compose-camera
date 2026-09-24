@@ -33,9 +33,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Compose 摄像头预览。
+ * Compose 摄像头预览
  *
- * [frameProcessor] 控制是否在 `CameraPreview-Analysis` 单线程同步接收最新帧。
+ * [frameProcessor] 控制是否在 `CameraPreview-Analysis` 单线程同步接收最新帧
  *
  * [cameraId] 是不透明的摄像头标识；为 `null` 时选择设备列表中的第一项。
  * [mirrorMode] 只影响预览和坐标矩阵，不修改帧数据。
@@ -75,7 +75,7 @@ fun CameraPreview(
   }
   val frameProcessorMode = frameProcessor.mode
   var previewSize by remember { mutableStateOf(IntSize.Zero) }
-  // 布局变化不重建 Controller，发布最新有效尺寸供下次开会话读取。
+  // 布局变化不重建 Controller，发布最新有效尺寸供下次开会话读取
   val latestPreviewViewSize = remember { AtomicReference(IntSize.Zero) }
   var activePreviewMirrored by remember { mutableStateOf<Boolean?>(null) }
 
@@ -138,7 +138,7 @@ fun CameraPreview(
   val failureDispatcher = remember(state, attemptIdentity) {
     MainThreadErrorDispatcher { error -> state.reportFailure(attemptIdentity, error) }
   }
-  // 设备枚举故障跨普通相机会话重建保留，只在设备状态或 retry 变化时失效。
+  // 设备枚举故障跨普通相机会话重建保留，只在设备状态或 retry 变化时失效
   val cameraDevicesAttemptIdentity = remember(state, devicesState, retryGeneration) {
     CameraDevicesAttemptIdentity()
   }
@@ -308,7 +308,7 @@ fun CameraPreview(
       if (size.width > 0 && size.height > 0) latestPreviewViewSize.set(size)
       previewSize = size
       state.updatePreviewLayout(size, contentScale, targetMirrored)
-      // 对已显示的会话同步更新矩阵，避免尺寸变化当帧仍使用旧值。
+      // 对已显示的会话同步更新矩阵，避免尺寸变化当帧仍使用旧值
       state.calculateCurrentTextureViewTransform(size, contentScale, targetMirrored)?.also { transform ->
         textureView?.setTransform(transform)
       }
@@ -422,7 +422,7 @@ internal fun capturePreviewScreenshot(
   }
 }
 
-/** 监听当前 View 所在显示器的旋转，包括不会触发 Configuration 变化的 180° 旋转。 */
+/** 监听当前 View 所在显示器的旋转，包括不会触发 Configuration 变化的 180° 旋转 */
 @Composable
 private fun rememberDisplayRotation(): Int {
   val context = LocalContext.current
@@ -460,7 +460,7 @@ private fun rememberDisplayRotation(): Int {
   return rotation
 }
 
-/** 始终排入主线程队列，使用户回调位于所有库内部 try/catch 之外。 */
+/** 始终排入主线程队列，使用户回调位于所有库内部 try/catch 之外 */
 internal class MainThreadErrorDispatcher(
   private val onError: (Throwable) -> Unit,
 ) {

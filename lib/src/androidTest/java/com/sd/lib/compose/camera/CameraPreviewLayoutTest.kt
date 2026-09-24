@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(AndroidJUnit4::class)
 class CameraPreviewLayoutTest {
-  // 使用系统绘制时钟，避免 Compose 测试时钟在绘制前推进多次重组。
+  // 使用系统绘制时钟，避免 Compose 测试时钟在绘制前推进多次重组
   private val _activityRule = ActivityScenarioRule(CameraPreviewTestActivity::class.java)
 
   @get:Rule

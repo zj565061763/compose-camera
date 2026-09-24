@@ -43,10 +43,10 @@ class CameraPreviewState internal constructor() {
   private var _takeScreenshotAction: ((CameraMirrorMode) -> Bitmap?)? = null
   private var _requestFocusAction: (() -> Unit)? = null
 
-  /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero]。 */
+  /** 当前会话使用的原始帧分辨率，会话未运行时为 [IntSize.Zero] */
   val previewResolution: State<IntSize> = _previewResolution
 
-  /** 需要重新枚举设备或重建相机会话的当前故障，其他普通异常只通过 [CameraPreview] 的 `onError` 报告。 */
+  /** 需要重新枚举设备或重建相机会话的当前故障，其他普通异常只通过 [CameraPreview] 的 `onError` 报告 */
   val failure: State<Throwable?> = _failure
 
   /**
@@ -61,7 +61,7 @@ class CameraPreviewState internal constructor() {
   }
 
   /**
-   * 请求当前预览执行一次自动对焦。
+   * 请求当前预览执行一次自动对焦
    *
    * 使用连续对焦、设备不支持单次自动对焦、预览未运行或已离开组合时不执行操作。
    */
@@ -202,7 +202,7 @@ class CameraPreviewState internal constructor() {
     val isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
     val orientedWidth = if (isQuarterTurn) config.bufferSize.height else config.bufferSize.width
     val orientedHeight = if (isQuarterTurn) config.bufferSize.width else config.bufferSize.height
-    // getBitmap 不应用 TextureView 内容矩阵，按内容比例截图后再显式绘制到预览区域。
+    // getBitmap 不应用 TextureView 内容矩阵，按内容比例截图后再显式绘制到预览区域
     val captureScale = minOf(
       1f,
       orientedWidth / geometry.contentSize.width,

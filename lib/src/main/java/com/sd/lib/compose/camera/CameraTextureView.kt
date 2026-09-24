@@ -6,7 +6,7 @@ import android.os.Handler
 import android.view.TextureView
 import java.util.concurrent.atomic.AtomicLong
 
-/** 保留 TextureView 的帧监听，并单独记录生产者提交的新帧。 */
+/** 保留 TextureView 的帧监听，并单独记录生产者提交的新帧 */
 internal class CameraTextureView(context: Context) : TextureView(context) {
   private var _surfaceTextureListener: SurfaceTextureListener? = null
 
@@ -16,7 +16,7 @@ internal class CameraTextureView(context: Context) : TextureView(context) {
   init {
     super.setSurfaceTextureListener(object : SurfaceTextureListener {
       override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-        // 等平台创建渲染层后再替换尚未交付的 Surface，保留低版本的销毁回调。
+        // 等平台创建渲染层后再替换尚未交付的 Surface，保留低版本的销毁回调
         val previewSurface = PreviewSurfaceTexture()
         previewSurface.setDefaultBufferSize(width, height)
         setSurfaceTexture(previewSurface)
@@ -56,7 +56,7 @@ private class PreviewSurfaceTexture : SurfaceTexture(0) {
   }
 
   override fun setOnFrameAvailableListener(listener: OnFrameAvailableListener?, handler: Handler?) {
-    // 首次绘制和可见性切换期间也记录帧；先计数，再让 TextureView 安排更新。
+    // 首次绘制和可见性切换期间也记录帧；先计数，再让 TextureView 安排更新
     super.setOnFrameAvailableListener({ surface ->
       _frameNumber.incrementAndGet()
       listener?.onFrameAvailable(surface)

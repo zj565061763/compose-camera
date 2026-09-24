@@ -2,7 +2,7 @@ package com.sd.lib.compose.camera
 
 /** 预览镜像模式 */
 enum class CameraMirrorMode {
-  /** 前置摄像头镜像，后置摄像头不镜像。 */
+  /** 前置摄像头镜像，后置摄像头不镜像 */
   AUTO,
 
   /** 始终镜像 */

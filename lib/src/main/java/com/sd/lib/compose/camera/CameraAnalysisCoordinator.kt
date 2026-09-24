@@ -5,7 +5,7 @@ import java.util.concurrent.Executors
 
 internal const val CAMERA_ANALYSIS_THREAD_NAME = "CameraPreview-Analysis"
 
-/** 在单个 CameraPreview 生命周期内串行执行分析，只保留最新待处理任务。 */
+/** 在单个 CameraPreview 生命周期内串行执行分析，只保留最新待处理任务 */
 internal class CameraAnalysisCoordinator(
   private val executorFactory: () -> ExecutorService = ::createCameraAnalysisExecutor,
 ) : AutoCloseable {

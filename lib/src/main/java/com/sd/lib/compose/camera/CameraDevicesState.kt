@@ -9,7 +9,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 
-/** 一次枚举得到的摄像头，调用方应把 [cameraId] 视为不透明标识。 */
+/** 一次枚举得到的摄像头，调用方应把 [cameraId] 视为不透明标识 */
 @Immutable
 data class CameraDeviceInfo(
   val cameraId: String,
@@ -55,7 +55,7 @@ class CameraDevicesState internal constructor() {
     _refreshAction = action
   }
 
-  /** 返回订阅前最近完成的刷新事件，由订阅者完成一次补发。 */
+  /** 返回订阅前最近完成的刷新事件，由订阅者完成一次补发 */
   @MainThread
   internal fun addRefreshListener(
     listener: (CameraDevicesRefreshEvent) -> Unit,
@@ -96,7 +96,7 @@ class CameraDevicesState internal constructor() {
 }
 
 /**
- * 发布当前能够识别的摄像头。
+ * 发布当前能够识别的摄像头
  *
  * 调用方应在取得 `android.permission.CAMERA` 后组合。
  * 状态不会监听运行时设备变化；需要更新列表时调用 [CameraDevicesState.refresh] 主动重新枚举。

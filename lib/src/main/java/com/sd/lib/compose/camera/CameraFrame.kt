@@ -13,11 +13,11 @@ sealed interface CameraFrame {
   /** 把帧顺时针旋转到当前预览方向所需的角度 */
   val rotationDegrees: Int
 
-  /** 可在帧回调结束后保留，用于判断异步结果是否仍属于当前预览变换。 */
+  /** 可在帧回调结束后保留，用于判断异步结果是否仍属于当前预览变换 */
   val transformToken: CameraFrameTransformToken
 
   /**
-   * 原始 NV21 预览帧。
+   * 原始 NV21 预览帧
    *
    * [data] 只在 [FrameProcessor.Preview.onFrame] 回调期间有效；需要异步处理时应复制数据，
    * 或先通过 [toBitmap] 创建独立图片。[width] 和 [height] 表示未旋转的原始帧尺寸。
@@ -31,7 +31,7 @@ sealed interface CameraFrame {
   ) : CameraFrame {
     override val transformToken = CameraFrameTransformToken(transformIdentity)
 
-    /** 把当前帧转换为独立的未旋转 Bitmap，转换失败时返回 `null`。 */
+    /** 把当前帧转换为独立的未旋转 Bitmap，转换失败时返回 `null` */
     fun toBitmap(): Bitmap? {
       return try {
         val imageData = nv21ToJpeg(data, width, height) ?: return null
@@ -43,7 +43,7 @@ sealed interface CameraFrame {
   }
 
   /**
-   * 从预览区域采样得到的帧。
+   * 从预览区域采样得到的帧
    *
    * [data] 已应用显示旋转和 [androidx.compose.ui.layout.ContentScale]，未由相机内容覆盖的区域透明；
    * 不包含镜像和预览上层内容，只在 [FrameProcessor.PreviewSampled.onFrame] 回调期间有效。
