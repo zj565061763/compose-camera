@@ -1,25 +1,33 @@
 # AGENTS.md
 
-本文是本仓库唯一的代理开发规范，适用于仓库根目录及全部子目录。
+本文是本仓库唯一的代理开发规范，适用于仓库根目录及全部子目录。`lib` 的行为约束、测试映射和验证清单统一记录在 `REVIEW_NOTES.md`。
 
 ## 语言偏好
 
-- 默认使用简体中文回复。
+- 默认使用简体中文回复，除非用户明确要求其他语言。
 - 代码、命令、API 名称、类名和原始错误信息保持原文，必要时补充中文解释。
-- 除非用户明确要求使用其他语言，否则不要切换语言。
 
 ## 修改前必读
 
-- 修改 `lib` 中的相机生命周期、设备枚举、错误转发、帧回调、预览尺寸、旋转、镜像或坐标转换前，必须完整阅读 `REVIEW_NOTES.md`。该文件是行为不变量和回归测试清单的权威记录。
+- 修改 `lib` 前必须完整阅读 `REVIEW_NOTES.md`，涉及相机生命周期、设备枚举、错误转发、帧回调、预览尺寸、旋转、镜像或坐标转换时尤其如此。
+- `REVIEW_NOTES.md` 是行为不变量和回归测试清单的权威记录，修改行为时同步更新。
 - 未经用户明确要求，不得修改 `README.md`；公开行为、示例或依赖发生变化时也只检查影响，不主动更新该文件。
-- 当前内部使用 Android 平台相机 API，公开 API 不得暴露具体后端类型；替换相机后端时必须重新验证 cameraId、帧数据、旋转、镜像和预览坐标转换。
+- 当前内部使用 Android 平台相机 API，公开 API 不得暴露具体后端类型。
 
 ## 构建环境
 
-- 使用仓库提交的 Gradle Wrapper 8.11.1 和 JDK 17。
-- Android Gradle Plugin 为 8.7.3，Kotlin 为 1.9.25。
-- `app` 与 `lib` 的 `compileSdk` 为 35，`app` 的 `targetSdk` 为 35，两个模块的 `minSdk` 均为 23。
-- 插件和依赖版本集中在 `gradle/libs.versions.toml`；仓库解析依赖时会先检查 `mavenLocal()`。
+| 项目 | 版本 |
+|---|---|
+| Gradle Wrapper | 8.11.1 |
+| JDK | 17 |
+| Android Gradle Plugin | 8.7.3 |
+| Kotlin | 1.9.25 |
+| `compileSdk`（`app` 与 `lib`） | 35 |
+| `targetSdk`（`app`） | 35 |
+| `minSdk`（`app` 与 `lib`） | 23 |
+
+- 插件和依赖版本集中在 `gradle/libs.versions.toml`。
+- 仓库解析依赖时会先检查 `mavenLocal()`。
 
 ## 常用命令
 
@@ -71,96 +79,73 @@ git diff --check
   -Pandroid.testInstrumentationRunnerArguments.class='com.sd.lib.compose.camera.CameraPreviewStateTest#createTransformToPreview_quarterTurnMapsRawCoordinates'
 ```
 
-`lib` 的测试主要位于 `src/androidTest`。状态和矩阵测试依赖 Android 类型，因此通过 `AndroidJUnit4` 运行；真实相机集成测试会自动授予 CAMERA 权限，并按设备能力跳过没有相机的场景。
-
 ## 模块职责
 
-- `lib/` 是发布到 Maven Central 的 Compose 相机库，公开包为 `com.sd.lib.compose.camera`。所有可复用行为放在此模块。
-- `app/` 只通过 `lib` 公开 API 工作，用于演示运行时权限、设备枚举、cameraId 切换、镜像切换和真机验证；不要把库逻辑放入该模块。
-- 库 Manifest 合并 CAMERA 权限，并把 camera 和 autofocus 硬件声明为可选。调用方仍必须先完成运行时授权，再组合 `CameraPreview`。
+| 模块 | 职责 |
+|---|---|
+| `lib/` | 发布到 Maven Central 的 Compose 相机库，公开包为 `com.sd.lib.compose.camera`，所有可复用行为放在此模块 |
+| `app/` | 只通过 `lib` 公开 API 工作，演示运行时权限、设备枚举、cameraId 切换、镜像切换和真机验证；不要把库逻辑放入该模块 |
+
+- `app/src/main/java/.../SampleActivity.kt` 是权限、设备切换、镜像切换和手动真机验证入口。
+- 库 Manifest 合并 CAMERA 权限，并把 camera 和 autofocus 硬件声明为可选。
+- 调用方仍必须先完成运行时授权，再组合 `CameraPreview`。
 
 ## 代码审查约定
 
-- 本库只面向已经配置 Compose 的项目，调用方应自行提供 Compose 相关依赖。`lib` 将 Compose 依赖声明为 `implementation` 是有意设计；审查时不得建议改为 `api`，也不得把公开 API 使用 Compose 类型但发布 API variant 不传递 Compose 依赖列为 Bug 或风险。
+- 本库只面向已经配置 Compose 的项目，调用方应自行提供 Compose 相关依赖。
+- `lib` 将 Compose 依赖声明为 `implementation` 是有意设计，审查时不得建议改为 `api`。
+- 不得把「公开 API 使用 Compose 类型，但发布的 API variant 不传递 Compose 依赖」列为 Bug 或风险。
 
-## 公开 API 与状态边界
+## 测试
 
-- `CameraPreview` 是入口 Composable；通过 nullable cameraId、`CameraMirrorMode`、`ContentScale` 和显示旋转配置预览。
-- `cameraId` 对调用方是不透明的 `String`，不得公开当前后端的数字 ID 语义或列表排序契约。
-- `CameraPreviewState` 属于单个正在组合的预览，保存 `previewResolution`、retry generation 和帧到预览的变换快照，不能在多个同时存在的预览间共享。
-- `CameraDevicesState` 表示最近一次枚举到的设备列表、加载或错误状态和主动刷新入口，可由设备选择 UI 与多个预览共享；共享设备状态不代表支持不同 cameraId 同时预览。
-- `CameraFrame.Preview.data` 和 `CameraFrame.PreviewSampled.data` 只保证在同步帧回调期间有效；允许跨回调保留的是数据副本、独立 `Bitmap` 或轻量 `CameraFrameTransformToken`。
-- `CameraFrame.Preview` 只能在 NV21 数据、宽高和旋转都有效时创建；公开的 `toBitmap()` 转换失败时返回 `null`。
-
-## 设备发现与手动刷新
-
-- `rememberCameraDevicesState()` 首次组合时枚举一次设备，不监听运行时设备变化，也不提供自动热插拔恢复。
-- 首次枚举失败后不做后台重试；主动调用 `CameraDevicesState.refresh()` 必须重新尝试枚举。
-- `CameraDevicesState.refresh()` 只更新设备列表；需要重新创建当前相机会话时调用 `CameraPreviewState.retry()`，它会同时触发一次设备刷新。
-- 单个设备读取镜头方向失败时必须保留其 cameraId，并把 lens 发布为 `null`，不能让异常厂商 HAL 阻断整批设备。
-- 设备列表保持平台原始顺序。`CameraPreview.cameraId == null` 时使用第一个摄像头；非空时精确选择，目标不存在时报告 `CAMERA_NOT_FOUND`，禁止隐式回退。
-
-## Compose 外壳与相机会话
-
-- `CameraPreview` 负责 Compose 尺寸、显示旋转、设备快照、错误订阅和 retry generation。
-- 只有获得非零布局尺寸且设备枚举完成后，才创建 `CameraPreviewController`。
-- 会话必须同时受 Lifecycle 和 `TextureView.SurfaceTexture` 生命周期约束；Lifecycle 停止、Surface 销毁或组件释放时关闭相机。
-- Surface 销毁时必须先在相机线程停止会话，再释放 `SurfaceTexture`。
-- 普通布局尺寸、`contentScale`、镜像模式和用户 lambda 变化只更新显示、坐标或回调引用，不得重复打开相机。
-- displayRotation、cameraId、帧处理模式和 retry generation 变化需要重建会话。
-- 只有使用原始 `FrameProcessor.Preview` 时才创建回调缓冲区并要求 NV21；专用单线程 analysis executor 在首个分析任务到达时懒创建。
-- 单个正在组合的 `CameraPreview` 在连续 Controller generation 及 `LifecycleOwner` 交接期间复用 `CameraPreview-Camera` 和 `CameraPreview-Analysis` 工作线程。Controller 在相机线程执行全部相机会话操作并只释放自己打开的相机；退出组合或当前 Lifecycle 销毁且所有 Controller 清理完成后，由 runtime 关闭工作线程，禁止影响进程内其他相机使用方。
-- 库不协调并发相机会话，不支持不同 cameraId 同时预览。
-
-## 预览与帧坐标转换
-
-- 参数设置后必须读取设备实际采用的 preview format 和 preview size；启用原始帧处理时格式必须是 NV21，实际尺寸用于发布 `previewResolution`，它表示原始帧缓冲区尺寸而不是 Compose 布局尺寸。
-- `TextureView` 必须按旋转后的缓冲区比例和 `ContentScale` 布局，禁止直接拉伸到 Compose 区域。
-- 前置摄像头的平台预览显示方向和原始帧旋转角度必须分别计算，禁止把镜像补偿后的显示方向用于帧数据或坐标变换。
-- 平台默认镜像前置预览；额外水平翻转合并到 `TextureView` 内容矩阵，只用于达到 `CameraMirrorMode` 指定的目标状态。
-- `CameraPreviewState` 以不可变快照和 `AtomicReference` 跨线程发布变换，分析线程无锁读取。
-- 变换链为 `raw frame -> display rotation -> ContentScale -> target mirror`。
-- 新会话、有效布局尺寸、`contentScale` 或目标镜像变化必须使旧 transform token 失效。
-- 异步分析结果写回 UI 前必须使用 `CameraPreviewState.isFrameTransformCurrent()` 校验 token。
-
-## 线程、错误与清理
-
-- 帧处理回调在当前 `CameraPreview` 共享的 `CameraPreview-Analysis` 专用线程同步执行，只保留正在处理的帧和最新待处理帧或采样请求。
-- 相机打开、配置、预览、对焦、回调缓冲区归还和释放统一在 `CameraPreview-Camera` 专用线程执行。
-- 优先使用连续对焦模式；只支持 `FOCUS_MODE_AUTO` 时，在当前会话首个有效预览帧触发一次单次对焦，之后仅响应 `CameraPreviewState.requestFocus()`，并在会话停止时丢弃待处理请求。
-- 每个相机回调缓冲区都必须在 `finally` 中归还。停止或释放会先使尚未取得执行权的帧失效，并在相机线程等待已经取得执行权的同步回调完成，不能中断用户回调。
-- NV21 缓冲区必须在创建 `CameraFrame` 前验证正偶数宽高、整数溢出和最小数据长度。
-- `onError` 在主线程收到设备枚举、选择、打开、配置、运行、帧回调和普通清理异常。已开始帧的异常可能晚于组件离开组合。
-- 清理必须尝试全部普通步骤并汇总普通 `Exception`：停止回调、清除错误监听、停止预览、释放相机、清空会话状态和关闭 executor。
-- 普通清理异常不能跳过后续步骤；致命 `Error` 不得作为业务异常吞掉。
-- 所有异步回调在写状态前必须确认当前 transform identity、会话或 loader 仍有效。
-
-## 测试布局与改动映射
-
-- `CameraPreviewStateTest.kt` 覆盖矩阵、镜像、transform identity、会话状态和错误发布；截图与 Bitmap、预览参数、对焦、清理、Runtime、原始帧和采样帧分别由对应的聚焦测试类覆盖。
-- `CameraDevicesStateTest.kt` 覆盖设备枚举失败和单个镜头方向读取失败。
-- `CameraPreviewIntegrationTest.kt` 使用真实相机和 Compose test rule，覆盖 NV21、Bitmap 转换、旋转、镜像、布局变换、retry、cameraId 选择与错误、Lifecycle 清理和工作线程。
-- `CameraManifestTest.kt` 验证库合并后的相机硬件特性仍为可选。
-- `app/src/main/java/.../SampleActivity.kt` 是权限、设备切换、镜像切换和手动真机验证入口。
-- 纯计算逻辑优先放入 JVM 测试；依赖 Android 图形类型、Lifecycle、权限或 Compose 集成的行为放入仪器测试。
-- 新增公开行为或修复回归时必须扩充对应测试。异步测试使用有超时的等待，禁止用固定 `sleep` 掩盖竞态。
-- 测试优先使用轻量 Fake，不使用 Mockito；断言使用 Google Truth；测试类显式声明 `AndroidJUnit4` runner。
+- `lib` 的测试全部位于 `src/androidTest`，测试类与覆盖范围见 `REVIEW_NOTES.md`。
+- 状态和矩阵测试依赖 Android 类型，因此通过 `AndroidJUnit4` 运行。
+- 纯计算逻辑优先放入 JVM 测试；`lib` 目前没有 `src/test` 和 `testImplementation` 依赖，新增时需先补齐。
+- 依赖 Android 图形类型、Lifecycle、权限或 Compose 集成的行为放入仪器测试。
+- 新增公开行为或修复回归时必须扩充对应测试。
+- 异步测试使用有超时的等待，禁止用固定 `sleep` 掩盖竞态。
+- 测试优先使用轻量 Fake，不使用 Mockito。
+- 断言使用 Google Truth，测试类显式声明 `AndroidJUnit4` runner。
 
 ## Kotlin 与代码约定
 
-- Kotlin 与 Gradle Kotlin DSL 使用两空格缩进；多行声明保留尾随逗号，优先使用不可变状态。
+- Kotlin 与 Gradle Kotlin DSL 使用两空格缩进，多行声明保留尾随逗号，优先使用不可变状态。
 - 类型和 Composable 使用 `PascalCase`，函数与属性使用 `camelCase`，常量使用 `UPPER_SNAKE_CASE`。
-- 使用 Kotlin 作用域函数时，如果调用结果没有被使用，且代码块只基于接收者执行操作或副作用，优先使用 `also`，不要使用 `let`。仅在需要使用代码块返回值进行转换或继续计算时使用 `let`。
+- 私有属性命名：
+  - 类或普通 `object` 类体中的 `private val/var` 用 `_camelCase`。
+  - `companion object` 中的私有属性用 `sCamelCase`。
+  - 构造参数中声明的私有属性用普通 `camelCase`。
+- 作用域函数的结果不被使用、只对接收者执行操作或副作用时用 `also`，不用 `let`；只有需要返回值继续计算时才用 `let`。
 - 每个文件原则上只包含一个主要公开类型，文件名与类型一致。
-- 代码换行应以语义清晰和可读性为准，不要仅因代码长度机械换行；一行表达更清晰时保留单行写法，并优先保留用户主动调整过的排版，除非格式检查或项目规范明确要求修改。
-- 公开 API 提供简洁 KDoc，注释尽量简短易读，优先使用单行注释；较长说明使用多行注释。如果整个注释只有一行并且整行中没有其他语义标点符号，那么末尾不需要加上句号。
-- 多行注释需要换行时，优先在逗号、分号、句号等语义标点符号后换行，避免在连续语义中间断行。
+- 按语义和可读性换行，不因长度机械换行；一行更清晰就保持单行，并保留用户主动调整过的排版，除非格式检查或项目规范要求修改。
 - 包名保持在 `com.sd.lib.compose.camera` 或 `com.sd.demo.compose.camera` 下。
 - 仓库没有独立 formatter 或 Detekt 任务，静态检查入口为 Android lint。
 
+## 注释与文档
+
+- 公开 API 提供 KDoc。
+- 注释简洁易懂：优先单行，单行正文的 KDoc 写成 `/** ... */`，一句只表达一层意思。
+- Markdown 文档用列表代替长段落，一条只说一件事；并列的对应关系用表格。
+- 整理文档时保留原有的约束、禁止项和豁免，不改变规则含义。
+
+注释句末标点按段落判断，段落以空行分隔：
+
+| 情况 | 段落末尾 |
+|---|---|
+| 正文只有一段，且只有一行 | 不加句号，即使含逗号、分号等 |
+| 正文有多段，某段只有一行，且没有逗号、分号、冒号等句内标点（标题式） | 不加句号 |
+| 正文有多段，某段只有一行，但含逗号、分号、冒号等句内标点 | 加句号 |
+| 某段跨多行 | 按完整句子补齐句末标点，不要求每个物理行末尾都有 |
+
+- `@param`、`@return` 等标签行不算段落，末尾不加句号。
+- 已有问号或感叹号时保留，不再追加句号。
+- 跨多行的段落优先在逗号、分号、句号等标点后换行，不在连续语义中间断行。
+
 ## 提交与本地配置
 
-- 提交标题使用简短、单主题中文，例如 `重构相机预览与帧回调`。
-- PR 说明应包含动机、行为变化和实际执行的验证命令；公开 API 或依赖变化要明确标注，可见预览变化附截图或录屏。
+- 提交标题保留英文类型和可选作用域，冒号后用简体中文，例如 `fix(lib): 保留分析期间已完成的帧结果`。
+- 提交标题保持简短，只写一个主题。
+- PR 说明应包含动机、行为变化和实际执行的验证命令。
+- 公开 API 或依赖变化要在 PR 中明确标注，可见预览变化附截图或录屏。
 - `app/template.jks` 是示例签名材料，不要替换为生产密钥。
 - 机器专属 Android SDK 路径保留在未跟踪的 `local.properties` 中。
