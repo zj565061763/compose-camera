@@ -11,9 +11,8 @@ class CameraFrameTransformToken internal constructor(
 ) {
   private val _transformIdentity = transformIdentity
 
-  /** 判断两个令牌是否来自同一个会话和显示坐标 generation */
+  /** 判断两个令牌是否来自同一个会话和显示坐标 generation，无效令牌始终返回 `false` */
   fun isSameTransform(other: CameraFrameTransformToken): Boolean {
-    if (this === other) return true
     val transformIdentity = _transformIdentity ?: return false
     return transformIdentity === other._transformIdentity
   }

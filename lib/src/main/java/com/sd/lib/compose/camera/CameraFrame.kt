@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
+import androidx.compose.ui.unit.IntSize
 import java.io.ByteArrayOutputStream
 
 /** 摄像头预览产生的分析帧 */
@@ -54,6 +55,9 @@ sealed interface CameraFrame {
     internal val transformIdentity: CameraFrameTransformIdentity?,
   ) : CameraFrame {
     override val transformToken = CameraFrameTransformToken(transformIdentity)
+
+    // 回调结束后 data 会被回收，计算坐标矩阵时使用创建时记录的尺寸
+    internal val dataSize = IntSize(data.width, data.height)
   }
 }
 

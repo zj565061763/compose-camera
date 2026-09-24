@@ -147,7 +147,7 @@ class CameraPreviewState internal constructor() {
   ): Matrix? {
     val geometry = config.geometry ?: return null
     if (frame.rotationDegrees != 0) return null
-    if (frame.data.width != config.previewSize.width || frame.data.height != config.previewSize.height) return null
+    if (frame.dataSize != config.previewSize) return null
     if (!config.isMirrored) return Matrix()
     return Matrix().apply {
       setValues(

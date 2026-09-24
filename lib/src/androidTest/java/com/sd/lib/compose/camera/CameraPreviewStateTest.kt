@@ -173,6 +173,32 @@ class CameraPreviewStateTest {
   }
 
   @Test
+  fun createTransformToPreview_sampledFrameUsesSizeRecordedBeforeRecycle() {
+    val state = CameraPreviewState()
+    val identity = CameraFrameTransformIdentity()
+    state.updatePreviewLayout(IntSize(4, 3), ContentScale.Fit, isMirrored = false)
+    state.startSession(identity, IntSize(2, 2), rotationDegrees = 0, isMirrored = false)
+    state.markPreviewFrameAvailable(identity)
+    val bitmap = Bitmap.createBitmap(4, 3, Bitmap.Config.ARGB_8888)
+    val frame = CameraFrame.PreviewSampled(bitmap, rotationDegrees = 0, transformIdentity = identity)
+    // 模拟回调结束后 data 已被回收
+    bitmap.recycle()
+
+    assertThat(state.createTransformToPreview(frame)).isNotNull()
+  }
+
+  @Test
+  fun transformToken_invalidTokenIsNotSameAsItself() {
+    val invalidToken = CameraFrameTransformToken(null)
+    val identity = CameraFrameTransformIdentity()
+    val validToken = CameraFrameTransformToken(identity)
+
+    assertThat(invalidToken.isSameTransform(invalidToken)).isFalse()
+    assertThat(invalidToken.isSameTransform(CameraFrameTransformToken(null))).isFalse()
+    assertThat(validToken.isSameTransform(CameraFrameTransformToken(identity))).isTrue()
+  }
+
+  @Test
   fun currentTextureViewTransform_sameResolutionUsesLatestSessionRotation() {
     val state = CameraPreviewState()
     val firstIdentity = CameraFrameTransformIdentity()
