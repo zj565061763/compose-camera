@@ -3,6 +3,8 @@ package com.sd.lib.compose.camera
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.RectF
+import android.util.Size
+import androidx.camera.core.AspectRatio
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -298,14 +300,53 @@ class CameraPreviewStateTest {
 
   @Test
   fun chooseAspectRatio_matchesOrientedPreviewArea() {
-    val ratio4By3 = androidx.camera.core.AspectRatio.RATIO_4_3
-    val ratio16By9 = androidx.camera.core.AspectRatio.RATIO_16_9
+    val ratio4By3 = AspectRatio.RATIO_4_3
+    val ratio16By9 = AspectRatio.RATIO_16_9
 
     assertThat(chooseAspectRatio(IntSize(1080, 1920), sensorRotationDegrees = 90)).isEqualTo(ratio16By9)
     assertThat(chooseAspectRatio(IntSize(1920, 1080), sensorRotationDegrees = 0)).isEqualTo(ratio16By9)
     assertThat(chooseAspectRatio(IntSize(300, 400), sensorRotationDegrees = 270)).isEqualTo(ratio4By3)
     assertThat(chooseAspectRatio(IntSize(500, 500), sensorRotationDegrees = 90)).isEqualTo(ratio4By3)
     assertThat(chooseAspectRatio(IntSize.Zero, sensorRotationDegrees = 90)).isEqualTo(ratio4By3)
+  }
+
+  @Test
+  fun resolutionSelector_excludesOversizedAnalysisCandidatesWithSmallestFallback() {
+    assertThat(maxAnalysisSize(AspectRatio.RATIO_16_9)).isEqualTo(Size(1280, 720))
+    assertThat(maxAnalysisSize(AspectRatio.RATIO_4_3)).isEqualTo(Size(1280, 960))
+
+    val filter = checkNotNull(resolutionSelector(AspectRatio.RATIO_16_9, Size(1280, 720)).resolutionFilter)
+
+    assertThat(
+      filter.filter(
+        listOf(Size(1280, 720), Size(640, 360), Size(1920, 1080)),
+        0,
+      ),
+    ).containsExactly(Size(1280, 720), Size(640, 360)).inOrder()
+
+    // 首选 16:9 仅剩超限尺寸而 4:3 存在符合 1280×720 限制的尺寸时，排除超限项与 1280×960
+    assertThat(
+      filter.filter(
+        listOf(Size(1920, 1080), Size(1280, 960), Size(640, 480)),
+        0,
+      ),
+    ).containsExactly(Size(640, 480))
+
+    // 竖向传感器候选尺寸按长短边校验，720×1280 仍在 1280×720 上限内
+    assertThat(
+      filter.filter(
+        listOf(Size(1080, 1920), Size(720, 1280)),
+        90,
+      ),
+    ).containsExactly(Size(720, 1280))
+
+    // 全部候选均超限时不能返回空列表，需按像素面积升序回退
+    assertThat(
+      filter.filter(
+        listOf(Size(3840, 2160), Size(1920, 1080)),
+        0,
+      ),
+    ).containsExactly(Size(1920, 1080), Size(3840, 2160)).inOrder()
   }
 }
 

@@ -63,6 +63,7 @@ internal class CameraSession(
   private var _sampler: PreviewFrameSampler? = null
   private var _focusController: CameraFocusController? = null
 
+  @Volatile
   private var _activeSession: PreviewSession? = null
   private var _hasSeenIdleStream = false
   private var _reportedError: CameraState.StateError? = null
@@ -141,7 +142,7 @@ internal class CameraSession(
         FrameProcessorMode.Preview -> {
           val analyzer = RawFrameAnalyzer(
             frameProcessor = frameProcessor,
-            currentTransformIdentity = state::currentTransformIdentity,
+            currentFrameTransform = { state.currentFrameTransform(_activeSession) },
             onError = onError,
           ).also { rawAnalyzer = it }
           analysis = ImageAnalysis.Builder()
@@ -228,10 +229,11 @@ internal class CameraSession(
   }
 
   private fun stopActiveSession() {
+    val session = _activeSession
+    _activeSession = null
     _focusController?.onSessionStopped()
     _sampler?.stop()
-    _activeSession?.also(state::clearSession)
-    _activeSession = null
+    session?.also(state::clearSession)
   }
 
   private fun onCameraStateChanged(cameraState: CameraState) {
@@ -249,7 +251,7 @@ internal class CameraSession(
   }
 }
 
-private fun resolutionSelector(aspectRatio: Int, maxSize: Size?): ResolutionSelector {
+internal fun resolutionSelector(aspectRatio: Int, maxSize: Size?): ResolutionSelector {
   return ResolutionSelector.Builder()
     .setAspectRatioStrategy(AspectRatioStrategy(aspectRatio, AspectRatioStrategy.FALLBACK_RULE_AUTO))
     .also { builder ->
@@ -257,14 +259,29 @@ private fun resolutionSelector(aspectRatio: Int, maxSize: Size?): ResolutionSele
         builder.setResolutionStrategy(
           ResolutionStrategy(size, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER),
         )
+        builder.setResolutionFilter { supportedSizes, _ ->
+          filterAnalysisSizes(supportedSizes, size)
+        }
       }
     }
     .build()
 }
 
 /** 原始帧需要逐帧转换为 NV21，限制分辨率以控制拷贝开销 */
-private fun maxAnalysisSize(aspectRatio: Int): Size {
+internal fun maxAnalysisSize(aspectRatio: Int): Size {
   return if (aspectRatio == AspectRatio.RATIO_16_9) Size(1280, 720) else Size(1280, 960)
+}
+
+internal fun filterAnalysisSizes(supportedSizes: List<Size>, maxSize: Size): List<Size> {
+  val withinLimit = supportedSizes.filter { it.fitsWithin(maxSize) }
+  if (withinLimit.isNotEmpty()) return withinLimit
+  return supportedSizes.sortedBy { it.width.toLong() * it.height }
+}
+
+private fun Size.fitsWithin(maxSize: Size): Boolean {
+  val maxLongSide = maxOf(maxSize.width, maxSize.height)
+  val maxShortSide = minOf(maxSize.width, maxSize.height)
+  return maxOf(width, height) <= maxLongSide && minOf(width, height) <= maxShortSide
 }
 
 private fun List<CameraInfo>.findCamera(cameraId: String?): Pair<CameraInfo, String>? {

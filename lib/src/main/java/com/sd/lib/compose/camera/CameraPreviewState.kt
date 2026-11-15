@@ -122,6 +122,25 @@ class CameraPreviewState internal constructor() {
     return _snapshot.get().transformIdentity
   }
 
+  @AnyThread
+  internal fun currentFrameTransform(): FrameTransformSnapshot {
+    val snapshot = _snapshot.get()
+    return FrameTransformSnapshot(
+      session = snapshot.session,
+      transformIdentity = snapshot.transformIdentity,
+    )
+  }
+
+  @AnyThread
+  internal fun currentFrameTransform(activeSession: PreviewSession?): FrameTransformSnapshot {
+    val snapshot = _snapshot.get()
+    val session = activeSession?.takeIf { it === snapshot.session }
+    return FrameTransformSnapshot(
+      session = session,
+      transformIdentity = if (session != null) snapshot.transformIdentity else null,
+    )
+  }
+
   @MainThread
   internal fun updatePreviewLayout(previewSize: IntSize, contentScale: ContentScale, isMirrored: Boolean) {
     publish { it.copy(previewSize = previewSize, contentScale = contentScale, isMirrored = isMirrored) }
@@ -236,6 +255,11 @@ class CameraPreviewState internal constructor() {
     _snapshot.set(next.copy(geometry = geometry, transformIdentity = transformIdentity))
   }
 }
+
+internal class FrameTransformSnapshot(
+  val session: PreviewSession?,
+  val transformIdentity: CameraFrameTransformIdentity?,
+)
 
 private data class PreviewSnapshot(
   val session: PreviewSession? = null,

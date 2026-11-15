@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.view.Surface
 import android.view.View
@@ -95,6 +97,22 @@ class CameraPreviewIntegrationTest {
     assertThat(frame.rotationDegrees).isEqualTo(checkNotNull(cameraInfo).getSensorRotationDegrees(Surface.ROTATION_0))
     assertThat(frame.bitmapSize).isEqualTo(frame.size)
     assertThat(frame.threadName).isEqualTo(CAMERA_ANALYSIS_THREAD_NAME)
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val selectedCameraInfo = ProcessCameraProvider.getInstance(context)
+      .get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+      .platformOrderedCameraInfos(context)
+      .firstOrNull()
+    val supportedYuvSizes = selectedCameraInfo?.cameraIdOrNull()?.let { id ->
+      val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+      manager.getCameraCharacteristics(id)
+        .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        ?.getOutputSizes(ImageFormat.YUV_420_888)
+        ?.toList()
+    }.orEmpty()
+    if (supportedYuvSizes.any { maxOf(it.width, it.height) <= 1280 && minOf(it.width, it.height) <= 960 }) {
+      assertThat(maxOf(frame.size.width, frame.size.height)).isAtMost(1280)
+      assertThat(minOf(frame.size.width, frame.size.height)).isAtMost(960)
+    }
     _composeRule.runOnIdle { assertThat(state.previewResolution.value).isEqualTo(frame.size) }
   }
 

@@ -49,7 +49,7 @@ internal class CameraAnalysisExecutor : Executor, AutoCloseable {
 /** 在分析线程将 `YUV_420_888` 原始帧转换为 NV21 并复用缓冲区，回调结束后关闭 [ImageProxy] */
 internal class RawFrameAnalyzer(
   private val frameProcessor: () -> FrameProcessor,
-  private val currentTransformIdentity: () -> CameraFrameTransformIdentity?,
+  private val currentFrameTransform: () -> FrameTransformSnapshot,
   private val onError: (Throwable) -> Unit,
 ) : ImageAnalysis.Analyzer, AutoCloseable {
   @Volatile
@@ -62,14 +62,19 @@ internal class RawFrameAnalyzer(
     image.use {
       if (_closed) return
       try {
-        val processor = frameProcessor() as? FrameProcessor.Preview ?: return
+        if (frameProcessor() !is FrameProcessor.Preview) return
+        val before = currentFrameTransform()
         val data = image.toNv21(_nv21Buffer)?.also { _nv21Buffer = it } ?: return
+        if (_closed) return
+        val after = currentFrameTransform()
+        if (before.session !== after.session) return
+        val processor = frameProcessor() as? FrameProcessor.Preview ?: return
         val frame = CameraFrame.Preview(
           data = data,
           width = image.width,
           height = image.height,
           rotationDegrees = image.imageInfo.rotationDegrees,
-          transformIdentity = currentTransformIdentity(),
+          transformIdentity = before.transformIdentity,
         )
         processor.onFrame(frame)
       } catch (error: Exception) {
