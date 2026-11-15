@@ -41,6 +41,7 @@ import org.junit.runner.RunWith
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -455,6 +456,87 @@ class CameraPreviewIntegrationTest {
     _composeRule.runOnIdle { lifecycleOwner.start() }
     waitForSession(state, error)
     _composeRule.runOnIdle { lifecycleOwner.destroy() }
+  }
+
+  @Test
+  fun lifecycleStopDuringQueuedRawFrame_resumesWithFreshTransform() {
+    assumeCameraAvailable()
+    val state = CameraPreviewState()
+    val lifecycleOwner = _composeRule.runOnIdle { FakeLifecycleOwner().also { it.start() } }
+    val error = AtomicReference<Throwable?>()
+    val firstFrameEntered = CountDownLatch(1)
+    val releaseFirstFrame = CountDownLatch(1)
+    val resumed = AtomicBoolean(false)
+    val firstToken = AtomicReference<CameraFrameTransformToken?>()
+    val resumedFrameReceived = CountDownLatch(1)
+    val resumedToken = AtomicReference<CameraFrameTransformToken?>()
+    val resumedMatrixValid = AtomicBoolean(false)
+    val reusedOldTokenAfterResume = AtomicBoolean(false)
+
+    _composeRule.setContent {
+      CompositionLocalProvider(LocalLifecycleOwner provides lifecycleOwner) {
+        CameraPreview(
+          modifier = Modifier.size(240.dp),
+          state = state,
+          onError = error::set,
+          frameProcessor = FrameProcessor.Preview { frame ->
+            if (firstToken.get() == null && state.isFrameTransformCurrent(frame.transformToken)) {
+              firstToken.set(frame.transformToken)
+              firstFrameEntered.countDown()
+              releaseFirstFrame.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+              return@Preview
+            }
+            if (!resumed.get()) return@Preview
+            val token = frame.transformToken
+            val oldToken = firstToken.get()
+            if (oldToken != null && token.isSameTransform(oldToken)) {
+              reusedOldTokenAfterResume.set(true)
+            }
+            if (resumedToken.get() == null && state.isFrameTransformCurrent(token)) {
+              resumedMatrixValid.set(state.createTransformToPreview(frame) != null)
+              resumedToken.set(token)
+              resumedFrameReceived.countDown()
+            }
+          },
+        )
+      }
+    }
+
+    try {
+      assertThat(firstFrameEntered.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+      val token1 = checkNotNull(firstToken.get())
+      val session1 = _composeRule.runOnIdle { state.displayedSession.value }
+
+      _composeRule.runOnIdle { lifecycleOwner.stop() }
+      _composeRule.waitUntil(TIMEOUT_MILLIS) {
+        state.currentTransformIdentity() == null && state.previewResolution.value == IntSize.Zero
+      }
+      _composeRule.runOnIdle { assertThat(state.isFrameTransformCurrent(token1)).isFalse() }
+
+      _composeRule.runOnIdle { lifecycleOwner.start() }
+      _composeRule.waitUntil(TIMEOUT_MILLIS) {
+        error.get() != null ||
+          (state.currentTransformIdentity() != null && state.displayedSession.value !== session1)
+      }
+      assertThat(error.get()).isNull()
+
+      resumed.set(true)
+      releaseFirstFrame.countDown()
+
+      assertThat(resumedFrameReceived.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+      assertThat(reusedOldTokenAfterResume.get()).isFalse()
+      assertThat(resumedMatrixValid.get()).isTrue()
+      val token2 = checkNotNull(resumedToken.get())
+      assertThat(token2.isSameTransform(token1)).isFalse()
+      _composeRule.runOnIdle {
+        assertThat(state.isFrameTransformCurrent(token1)).isFalse()
+        assertThat(state.isFrameTransformCurrent(token2)).isTrue()
+      }
+      assertThat(error.get()).isNull()
+    } finally {
+      releaseFirstFrame.countDown()
+      _composeRule.runOnIdle { lifecycleOwner.destroy() }
+    }
   }
 
   @Test

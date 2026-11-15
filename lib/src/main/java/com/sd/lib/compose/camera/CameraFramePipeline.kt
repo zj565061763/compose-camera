@@ -57,6 +57,25 @@ internal class RawFrameAnalyzer(
 
   // 仅在分析单线程读写；原始帧数据只在同步回调期间有效，因此安全复用
   private var _nv21Buffer: ByteArray? = null
+  private var _enqueuedTransform: FrameTransformSnapshot? = null
+  private var _hasEnqueuedTransform = false
+
+  /** 包装分析执行器，在任务入队时记录会话快照，防止排队旧帧在恢复后取得新会话令牌 */
+  fun executor(delegate: Executor): Executor {
+    return Executor { command ->
+      val enqueued = currentFrameTransform()
+      delegate.execute {
+        _enqueuedTransform = enqueued
+        _hasEnqueuedTransform = true
+        try {
+          command.run()
+        } finally {
+          _enqueuedTransform = null
+          _hasEnqueuedTransform = false
+        }
+      }
+    }
+  }
 
   override fun analyze(image: ImageProxy) {
     image.use {
@@ -64,6 +83,8 @@ internal class RawFrameAnalyzer(
       try {
         if (frameProcessor() !is FrameProcessor.Preview) return
         val before = currentFrameTransform()
+        val enqueued = if (_hasEnqueuedTransform) _enqueuedTransform else before
+        if (enqueued == null || enqueued.session !== before.session) return
         val data = image.toNv21(_nv21Buffer)?.also { _nv21Buffer = it } ?: return
         if (_closed) return
         val after = currentFrameTransform()
@@ -110,6 +131,8 @@ internal class PreviewFrameSampler(
   private var _closed = false
   @Volatile
   private var _running = false
+  @Volatile
+  private var _runGeneration = 0
   private var _scheduledIntervalMillis = 0L
   private var _lastTickUptimeMillis = 0L
 
@@ -117,6 +140,7 @@ internal class PreviewFrameSampler(
   fun start() {
     if (_closed || _running) return
     val processor = frameProcessor() as? FrameProcessor.PreviewSampled ?: return
+    ++_runGeneration
     _running = true
     _lastTickUptimeMillis = uptimeMillis()
     scheduleNext(processor.intervalMillis)
@@ -125,6 +149,7 @@ internal class PreviewFrameSampler(
   @MainThread
   fun stop() {
     if (!_running) return
+    ++_runGeneration
     _running = false
     _scheduledIntervalMillis = 0L
     mainHandler.removeCallbacks(_sampleTask)
@@ -154,6 +179,7 @@ internal class PreviewFrameSampler(
     val processor = frameProcessor() as? FrameProcessor.PreviewSampled ?: return
     _lastTickUptimeMillis = uptimeMillis()
     if (_isDelivering.compareAndSet(false, true)) {
+      val generation = _runGeneration
       val frame = try {
         captureFrame()
       } catch (error: Exception) {
@@ -162,7 +188,7 @@ internal class PreviewFrameSampler(
       }
       if (frame == null) {
         _isDelivering.set(false)
-      } else if (!analysisExecutor.submit { deliverFrame(frame) }) {
+      } else if (!analysisExecutor.submit { deliverFrame(frame, generation) }) {
         frame.data.recycle()
         _isDelivering.set(false)
       }
@@ -177,9 +203,9 @@ internal class PreviewFrameSampler(
     mainHandler.postDelayed(_sampleTask, intervalMillis)
   }
 
-  private fun deliverFrame(frame: CameraFrame.PreviewSampled) {
+  private fun deliverFrame(frame: CameraFrame.PreviewSampled, generation: Int) {
     try {
-      if (!_closed && _running) {
+      if (!_closed && _running && _runGeneration == generation) {
         (frameProcessor() as? FrameProcessor.PreviewSampled)?.onFrame?.invoke(frame)
       }
     } catch (error: Exception) {

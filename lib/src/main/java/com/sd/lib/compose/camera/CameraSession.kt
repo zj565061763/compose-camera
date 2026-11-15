@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.Observer
 import java.util.concurrent.ExecutionException
@@ -52,8 +53,10 @@ internal class CameraSession(
   private val _mainExecutor = ContextCompat.getMainExecutor(context)
   private val _streamObserver = Observer(::onStreamStateChanged)
   private val _cameraStateObserver = Observer(::onCameraStateChanged)
+  private val _lifecycleObserver = LifecycleEventObserver { _, event -> onLifecycleEvent(event) }
 
   private var _closed = false
+  private var _isLifecycleStarted = false
   private var _provider: ProcessCameraProvider? = null
   private var _camera: Camera? = null
   private var _preview: Preview? = null
@@ -104,13 +107,14 @@ internal class CameraSession(
   override fun close() {
     if (_closed) return
     _closed = true
+    _isLifecycleStarted = false
     stopActiveSession()
     _focusController?.close()
     _sampler?.close()
-    _rawAnalyzer?.close()
+    detachRawAnalyzer()
+    lifecycleOwner.lifecycle.removeObserver(_lifecycleObserver)
     previewView.previewStreamState.removeObserver(_streamObserver)
     _camera?.cameraInfo?.cameraState?.removeObserver(_cameraStateObserver)
-    _analysis?.clearAnalyzer()
     _preview?.surfaceProvider = null
     _provider?.unbind(*listOfNotNull(_preview, _analysis).toTypedArray())
   }
@@ -140,17 +144,13 @@ internal class CameraSession(
       when (config.frameMode) {
         FrameProcessorMode.None -> Unit
         FrameProcessorMode.Preview -> {
-          val analyzer = RawFrameAnalyzer(
-            frameProcessor = frameProcessor,
-            currentFrameTransform = { state.currentFrameTransform(_activeSession) },
-            onError = onError,
-          ).also { rawAnalyzer = it }
+          val analyzer = createRawAnalyzer().also { rawAnalyzer = it }
           analysis = ImageAnalysis.Builder()
             .setTargetRotation(rotation)
             .setResolutionSelector(resolutionSelector(aspectRatio, maxAnalysisSize(aspectRatio)))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
-            .also { it.setAnalyzer(analysisExecutor, analyzer) }
+            .also { it.setAnalyzer(analyzer.executor(analysisExecutor), analyzer) }
         }
         FrameProcessorMode.PreviewSampled -> {
           sampler = PreviewFrameSampler(
@@ -190,6 +190,8 @@ internal class CameraSession(
       operations = CameraXFocusOperations(camera, _mainExecutor),
       onError = onError,
     )
+    _isLifecycleStarted = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+    lifecycleOwner.lifecycle.addObserver(_lifecycleObserver)
     camera.cameraInfo.cameraState.observeForever(_cameraStateObserver)
     previewView.previewStreamState.observeForever(_streamObserver)
   }
@@ -233,7 +235,52 @@ internal class CameraSession(
     _activeSession = null
     _focusController?.onSessionStopped()
     _sampler?.stop()
-    session?.also(state::clearSession)
+    if (session != null) {
+      resetRawAnalyzer()
+      state.clearSession(session)
+    }
+  }
+
+  private fun onLifecycleEvent(event: Lifecycle.Event) {
+    if (_closed) return
+    when (event) {
+      Lifecycle.Event.ON_START -> {
+        _isLifecycleStarted = true
+        attachRawAnalyzerIfNeeded()
+      }
+      Lifecycle.Event.ON_STOP,
+      Lifecycle.Event.ON_DESTROY -> {
+        _isLifecycleStarted = false
+        detachRawAnalyzer()
+      }
+      else -> Unit
+    }
+  }
+
+  private fun createRawAnalyzer(): RawFrameAnalyzer {
+    return RawFrameAnalyzer(
+      frameProcessor = frameProcessor,
+      currentFrameTransform = { state.currentFrameTransform(_activeSession) },
+      onError = onError,
+    )
+  }
+
+  private fun attachRawAnalyzerIfNeeded() {
+    if (_closed || !_isLifecycleStarted || _rawAnalyzer != null) return
+    val analysis = _analysis ?: return
+    val analyzer = createRawAnalyzer().also { _rawAnalyzer = it }
+    analysis.setAnalyzer(analyzer.executor(analysisExecutor), analyzer)
+  }
+
+  private fun detachRawAnalyzer() {
+    _rawAnalyzer?.close()
+    _rawAnalyzer = null
+    _analysis?.clearAnalyzer()
+  }
+
+  private fun resetRawAnalyzer() {
+    detachRawAnalyzer()
+    attachRawAnalyzerIfNeeded()
   }
 
   private fun onCameraStateChanged(cameraState: CameraState) {

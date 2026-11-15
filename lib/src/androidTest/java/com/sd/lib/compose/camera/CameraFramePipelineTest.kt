@@ -381,6 +381,154 @@ class CameraFramePipelineTest {
     assertThat(state.isFrameTransformCurrent(deliveredTokens[2])).isTrue()
   }
 
+  @Test
+  fun rawAnalyzer_dropsQueuedFrameWhenSessionStopsAndRestartsBeforeAnalyze() {
+    val state = CameraPreviewState()
+    val session1 = PreviewSession(
+      contentSize = IntSize(100, 100),
+      isPreviewMirrored = false,
+      resolution = IntSize(2, 2),
+      rawFrame = null,
+    )
+    val session2 = PreviewSession(
+      contentSize = IntSize(100, 100),
+      isPreviewMirrored = false,
+      resolution = IntSize(2, 2),
+      rawFrame = null,
+    )
+    runOnMainSync {
+      state.updatePreviewLayout(IntSize(100, 100), ContentScale.Crop, isMirrored = false)
+      state.startSession(session1)
+    }
+    val activeSessionRef = AtomicReference<PreviewSession?>(session1)
+    val blockerEntered = CountDownLatch(1)
+    val releaseBlocker = CountDownLatch(1)
+    val deliveredFrames = CopyOnWriteArrayList<Pair<Byte, CameraFrameTransformToken>>()
+    val errors = CopyOnWriteArrayList<Throwable>()
+    val analyzer = RawFrameAnalyzer(
+      frameProcessor = {
+        FrameProcessor.Preview { frame ->
+          deliveredFrames.add(frame.data[0] to frame.transformToken)
+        }
+      },
+      currentFrameTransform = {
+        state.currentFrameTransform(activeSessionRef.get())
+      },
+      onError = errors::add,
+    )
+    val executor = CameraAnalysisExecutor()
+    val analyzerExecutor = analyzer.executor(executor)
+    val queuedFromSession1 = FakeYuvImageProxy(yBytes = byteArrayOf(1, 1, 1, 1))
+    val queuedWhileStopped = FakeYuvImageProxy(yBytes = byteArrayOf(2, 2, 2, 2))
+    val freshFromSession2 = FakeYuvImageProxy(yBytes = byteArrayOf(9, 9, 9, 9))
+
+    try {
+      assertThat(
+        executor.submit {
+          blockerEntered.countDown()
+          releaseBlocker.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        },
+      ).isTrue()
+      assertThat(blockerEntered.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+
+      analyzerExecutor.execute { analyzer.analyze(queuedFromSession1) }
+      runOnMainSync {
+        activeSessionRef.set(null)
+        state.clearSession(session1)
+      }
+      analyzerExecutor.execute { analyzer.analyze(queuedWhileStopped) }
+      runOnMainSync {
+        state.startSession(session2)
+        activeSessionRef.set(session2)
+      }
+      releaseBlocker.countDown()
+      analyzerExecutor.execute { analyzer.analyze(freshFromSession2) }
+
+      val drained = CountDownLatch(1)
+      assertThat(executor.submit(drained::countDown)).isTrue()
+      assertThat(drained.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    } finally {
+      releaseBlocker.countDown()
+      analyzer.close()
+      executor.close()
+    }
+
+    assertThat(errors).isEmpty()
+    assertThat(queuedFromSession1.isClosed).isTrue()
+    assertThat(queuedWhileStopped.isClosed).isTrue()
+    assertThat(freshFromSession2.isClosed).isTrue()
+    assertThat(deliveredFrames).hasSize(1)
+    assertThat(deliveredFrames[0].first).isEqualTo(9.toByte())
+    assertThat(state.isFrameTransformCurrent(deliveredFrames[0].second)).isTrue()
+  }
+
+  @Test
+  fun sampler_stopAndRestartSkipsPreviouslyQueuedFrame() {
+    val executor = CameraAnalysisExecutor()
+    val blockerEntered = CountDownLatch(1)
+    val releaseBlocker = CountDownLatch(1)
+    val firstCaptured = CountDownLatch(1)
+    val restartedDelivered = CountDownLatch(1)
+    val capturedBitmaps = CopyOnWriteArrayList<Bitmap>()
+    val deliveredBitmaps = CopyOnWriteArrayList<Bitmap>()
+    val errors = CopyOnWriteArrayList<Throwable>()
+    var sampler: PreviewFrameSampler? = null
+
+    try {
+      assertThat(
+        executor.submit {
+          blockerEntered.countDown()
+          releaseBlocker.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        },
+      ).isTrue()
+      assertThat(blockerEntered.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+
+      runOnMainSync {
+        sampler = PreviewFrameSampler(
+          frameProcessor = {
+            FrameProcessor.PreviewSampled(intervalMillis = 10L) { frame ->
+              deliveredBitmaps.add(frame.data)
+              restartedDelivered.countDown()
+            }
+          },
+          captureFrame = {
+            val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+            capturedBitmaps.add(bitmap)
+            firstCaptured.countDown()
+            CameraFrame.PreviewSampled(bitmap, 0, CameraFrameTransformIdentity())
+          },
+          analysisExecutor = executor,
+          onError = errors::add,
+        ).also { it.start() }
+      }
+
+      assertThat(firstCaptured.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+      runOnMainSync {
+        checkNotNull(sampler).also {
+          it.stop()
+          it.start()
+        }
+      }
+      releaseBlocker.countDown()
+
+      assertThat(restartedDelivered.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+      runOnMainSync { sampler?.close() }
+      val drained = CountDownLatch(1)
+      assertThat(executor.submit(drained::countDown)).isTrue()
+      assertThat(drained.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)).isTrue()
+    } finally {
+      releaseBlocker.countDown()
+      runOnMainSync { sampler?.close() }
+      executor.close()
+    }
+
+    assertThat(errors).isEmpty()
+    assertThat(capturedBitmaps.size).isAtLeast(2)
+    assertThat(deliveredBitmaps).isNotEmpty()
+    assertThat(deliveredBitmaps).doesNotContain(capturedBitmaps[0])
+    assertThat(capturedBitmaps.all { it.isRecycled }).isTrue()
+  }
+
   private companion object {
     const val TIMEOUT_SECONDS = 5L
   }
@@ -392,11 +540,12 @@ private fun runOnMainSync(action: () -> Unit) {
 
 private class FakeYuvImageProxy(
   private val onReadY: () -> Unit = {},
+  yBytes: ByteArray = byteArrayOf(1, 2, 3, 4),
 ) : ImageProxy {
   private val _closed = AtomicBoolean(false)
   private var _cropRect = Rect(0, 0, 2, 2)
   private val _planes = arrayOf<ImageProxy.PlaneProxy>(
-    FakePlaneProxy(rowStride = 2, bytes = byteArrayOf(1, 2, 3, 4), beforeRead = onReadY),
+    FakePlaneProxy(rowStride = 2, bytes = yBytes, beforeRead = onReadY),
     FakePlaneProxy(rowStride = 2, bytes = byteArrayOf(10)),
     FakePlaneProxy(rowStride = 2, bytes = byteArrayOf(20)),
   )
