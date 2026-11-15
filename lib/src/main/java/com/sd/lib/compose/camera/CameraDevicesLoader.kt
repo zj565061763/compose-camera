@@ -2,6 +2,8 @@ package com.sd.lib.compose.camera
 
 import android.content.Context
 import android.hardware.camera2.CameraManager
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -43,7 +45,10 @@ internal class CameraXDevicesSource(private val context: Context) : CameraDevice
     future.addListener(
       {
         val result = try {
-          Result.success(future.get().platformOrderedCameraInfos(context).map(::toCameraDeviceInfo))
+          val devices = future.get()
+            .platformOrderedCameraInfos(context)
+            .mapNotNull(::toCameraDeviceInfoOrNull)
+          Result.success(devices)
         } catch (error: ExecutionException) {
           Result.failure(error.cause ?: error)
         } catch (error: Exception) {
@@ -56,7 +61,7 @@ internal class CameraXDevicesSource(private val context: Context) : CameraDevice
   }
 }
 
-/** 按系统相机列表的顺序返回 CameraX 可用的摄像头，与平台设备序号一致 */
+/** 按系统相机列表的顺序返回 CameraX 可用的摄像头，与平台设备顺序一致 */
 internal fun ProcessCameraProvider.platformOrderedCameraInfos(context: Context): List<CameraInfo> {
   val cameraInfos = availableCameraInfos
   val platformIds = try {
@@ -65,15 +70,42 @@ internal fun ProcessCameraProvider.platformOrderedCameraInfos(context: Context):
     return cameraInfos
   }
   return cameraInfos.sortedBy { info ->
-    platformIds.indexOf(info.cameraIdString).takeIf { it >= 0 } ?: Int.MAX_VALUE
+    val id = info.cameraIdOrNull()
+    if (id == null) {
+      Int.MAX_VALUE
+    } else {
+      platformIds.indexOf(id).takeIf { it >= 0 } ?: Int.MAX_VALUE
+    }
   }
 }
 
-private fun toCameraDeviceInfo(info: CameraInfo): CameraDeviceInfo {
-  val lens = when (info.lensFacing) {
+@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+internal fun CameraInfo.cameraIdOrNull(): String? {
+  return try {
+    Camera2CameraInfo.from(this).cameraId
+  } catch (_: Exception) {
+    null
+  }
+}
+
+/** 读取镜头方向，厂商 HAL 缺失或返回未知枚举时回退为 `null`，避免阻断整批设备枚举 */
+internal fun CameraInfo.resolveCameraLensOrNull(): CameraLens? {
+  val facing = try {
+    lensFacing
+  } catch (_: Exception) {
+    return null
+  }
+  return when (facing) {
     CameraSelector.LENS_FACING_FRONT -> CameraLens.FRONT
     CameraSelector.LENS_FACING_BACK -> CameraLens.BACK
     else -> null
   }
-  return CameraDeviceInfo(cameraId = info.cameraIdString, lens = lens)
+}
+
+private fun toCameraDeviceInfoOrNull(info: CameraInfo): CameraDeviceInfo? {
+  val cameraId = info.cameraIdOrNull() ?: return null
+  return CameraDeviceInfo(
+    cameraId = cameraId,
+    lens = info.resolveCameraLensOrNull(),
+  )
 }

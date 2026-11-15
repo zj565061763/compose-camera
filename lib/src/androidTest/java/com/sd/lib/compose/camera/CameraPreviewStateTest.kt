@@ -102,6 +102,27 @@ class CameraPreviewStateTest {
 
   @Test
   @UiThreadTest
+  fun startSession_doesNotPublishTransformForInvalidRawFrameLayout() {
+    val state = CameraPreviewState()
+    state.updatePreviewLayout(IntSize(100, 100), ContentScale.Crop, isMirrored = false)
+    val invalidLayouts = listOf(
+      RawFrameLayout(bufferSize = IntSize(640, 480), cropRect = IntRect.Zero, rotationDegrees = 0),
+      RawFrameLayout(bufferSize = IntSize(640, 480), cropRect = IntRect(100, 100, 50, 100), rotationDegrees = 0),
+      RawFrameLayout(bufferSize = IntSize.Zero, cropRect = IntRect(0, 0, 100, 100), rotationDegrees = 0),
+    )
+
+    invalidLayouts.forEach { invalidRawFrame ->
+      state.startSession(session(contentSize = IntSize(100, 100), rawFrame = invalidRawFrame))
+      val token = CameraFrameTransformToken(state.currentTransformIdentity())
+      assertThat(state.currentTransformIdentity()).isNull()
+      assertThat(state.isFrameTransformCurrent(token)).isFalse()
+      assertThat(state.createTransformToPreview(currentFrame(state, 640, 480, 0))).isNull()
+      assertThat(state.capturePreview(CameraMirrorMode.AUTO) { twoColorBitmap() }).isNull()
+    }
+  }
+
+  @Test
+  @UiThreadTest
   fun createTransformToPreview_sampledFrameUsesSizeRecordedBeforeRecycle() {
     val state = CameraPreviewState()
     state.updatePreviewLayout(IntSize(4, 3), ContentScale.Fit, isMirrored = false)
@@ -210,14 +231,23 @@ class CameraPreviewStateTest {
   @UiThreadTest
   fun reset_clearsStateActionsAndRetryGeneration() {
     val state = CameraPreviewState()
+    var focusRequested = false
     state.startSession(session(contentSize = IntSize(100, 100)))
     state.reportSessionFailure(IllegalStateException())
-    state.attachRequestFocusAction {}
+    state.attachSessionController(
+      object : CameraSessionController {
+        override fun requestFocus() {
+          focusRequested = true
+        }
+      },
+    )
     state.attachTakeScreenshotAction { null }
     state.retry()
 
     state.reset()
+    state.requestFocus()
 
+    assertThat(focusRequested).isFalse()
     assertThat(state.retryGeneration).isEqualTo(0)
     assertThat(state.failure.value).isNull()
     assertThat(state.displayedSession.value).isNull()
@@ -277,40 +307,42 @@ class CameraPreviewStateTest {
     assertThat(chooseAspectRatio(IntSize(500, 500), sensorRotationDegrees = 90)).isEqualTo(ratio4By3)
     assertThat(chooseAspectRatio(IntSize.Zero, sensorRotationDegrees = 90)).isEqualTo(ratio4By3)
   }
+}
 
-  private fun assertPoints(actual: FloatArray, vararg expected: Float) {
-    assertThat(actual.size).isEqualTo(expected.size)
-    actual.forEachIndexed { index, value -> assertThat(value).isWithin(0.01f).of(expected[index]) }
+private fun assertPoints(actual: FloatArray, vararg expected: Float) {
+  assertThat(actual.size).isEqualTo(expected.size)
+  actual.forEachIndexed { index, value ->
+    assertThat(value).isWithin(0.01f).of(expected[index])
   }
+}
 
-  private fun session(
-    contentSize: IntSize,
-    isPreviewMirrored: Boolean = false,
-    rawFrame: RawFrameLayout? = null,
-  ): PreviewSession {
-    return PreviewSession(
-      contentSize = contentSize,
-      isPreviewMirrored = isPreviewMirrored,
-      resolution = rawFrame?.bufferSize ?: contentSize,
-      rawFrame = rawFrame,
-    )
-  }
+private fun session(
+  contentSize: IntSize,
+  isPreviewMirrored: Boolean = false,
+  rawFrame: RawFrameLayout? = null,
+): PreviewSession {
+  return PreviewSession(
+    contentSize = contentSize,
+    isPreviewMirrored = isPreviewMirrored,
+    resolution = rawFrame?.bufferSize ?: contentSize,
+    rawFrame = rawFrame,
+  )
+}
 
-  private fun rawFrame(bufferSize: IntSize, rotationDegrees: Int): RawFrameLayout {
-    return RawFrameLayout(bufferSize, IntRect(0, 0, bufferSize.width, bufferSize.height), rotationDegrees)
-  }
+private fun rawFrame(bufferSize: IntSize, rotationDegrees: Int): RawFrameLayout {
+  return RawFrameLayout(bufferSize, IntRect(0, 0, bufferSize.width, bufferSize.height), rotationDegrees)
+}
 
-  private fun currentFrame(state: CameraPreviewState, width: Int, height: Int, rotationDegrees: Int): CameraFrame.Preview {
-    return frame(state.currentTransformIdentity(), width, height, rotationDegrees)
-  }
+private fun currentFrame(state: CameraPreviewState, width: Int, height: Int, rotationDegrees: Int): CameraFrame.Preview {
+  return frame(state.currentTransformIdentity(), width, height, rotationDegrees)
+}
 
-  /** 左半红色、右半蓝色的 2×2 图片 */
-  private fun twoColorBitmap(): Bitmap {
-    return Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply {
-      setPixel(0, 0, Color.RED)
-      setPixel(0, 1, Color.RED)
-      setPixel(1, 0, Color.BLUE)
-      setPixel(1, 1, Color.BLUE)
-    }
+/** 左半红色、右半蓝色的 2×2 图片 */
+private fun twoColorBitmap(): Bitmap {
+  return Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).apply {
+    setPixel(0, 0, Color.RED)
+    setPixel(0, 1, Color.RED)
+    setPixel(1, 0, Color.BLUE)
+    setPixel(1, 1, Color.BLUE)
   }
 }

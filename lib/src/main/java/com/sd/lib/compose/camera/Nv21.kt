@@ -1,10 +1,13 @@
 package com.sd.lib.compose.camera
 
 import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
 import androidx.camera.core.ImageProxy
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 
-/** 把 YUV_420_888 帧转换为 NV21，尺寸匹配时复用 [reuse] */
+/** 把 `YUV_420_888` 帧转换为 NV21，尺寸匹配时复用 [reuse] */
 internal fun ImageProxy.toNv21(reuse: ByteArray?): ByteArray? {
   if (format != ImageFormat.YUV_420_888 || planes.size < 3) return null
   val size = nv21BufferSize(width, height) ?: return null
@@ -47,12 +50,16 @@ internal fun copyYuv420ToNv21(
       yRows.get(output, index, width)
       index += width
     } else {
-      for (column in 0 until width) output[index++] = y.get(rowStart + column * yPixelStride)
+      for (column in 0 until width) {
+        output[index++] = y.get(rowStart + column * yPixelStride)
+      }
     }
   }
-  for (row in 0 until height / 2) {
+  val chromaHeight = height / 2
+  val chromaWidth = width / 2
+  for (row in 0 until chromaHeight) {
     val rowStart = row * uvRowStride
-    for (column in 0 until width / 2) {
+    for (column in 0 until chromaWidth) {
       val offset = rowStart + column * uvPixelStride
       output[index++] = v.get(offset)
       output[index++] = u.get(offset)
@@ -66,4 +73,14 @@ internal fun nv21BufferSize(width: Int, height: Int): Int? {
   val pixelCount = width.toLong() * height
   if (pixelCount > Int.MAX_VALUE * 2L / 3L) return null
   return (pixelCount * 3 / 2).toInt()
+}
+
+internal fun nv21ToJpeg(data: ByteArray, width: Int, height: Int): ByteArray? {
+  val requiredSize = nv21BufferSize(width, height) ?: return null
+  if (data.size < requiredSize) return null
+  val output = ByteArrayOutputStream()
+  val compressed = YuvImage(data, ImageFormat.NV21, width, height, null)
+    .compressToJpeg(Rect(0, 0, width, height), 100, output)
+  if (!compressed) return null
+  return output.toByteArray()
 }

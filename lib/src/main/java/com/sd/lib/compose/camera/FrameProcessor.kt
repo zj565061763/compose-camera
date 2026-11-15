@@ -10,7 +10,7 @@ sealed interface FrameProcessor {
     val onFrame: (CameraFrame.Preview) -> Unit,
   ) : FrameProcessor
 
-  /** 按指定间隔从预览区域截图，间隔必须大于零 */
+  /** 按指定间隔从预览区域采样，间隔必须大于零 */
   class PreviewSampled(
     val intervalMillis: Long,
     val onFrame: (CameraFrame.PreviewSampled) -> Unit,
@@ -22,14 +22,15 @@ sealed interface FrameProcessor {
 }
 
 internal enum class FrameProcessorMode {
-  NONE,
-  PREVIEW,
-  PREVIEW_SAMPLED,
+  None,
+  Preview,
+  PreviewSampled,
 }
 
-internal val FrameProcessor.mode: FrameProcessorMode
-  get() = when (this) {
-    FrameProcessor.None -> FrameProcessorMode.NONE
-    is FrameProcessor.Preview -> FrameProcessorMode.PREVIEW
-    is FrameProcessor.PreviewSampled -> FrameProcessorMode.PREVIEW_SAMPLED
+internal fun FrameProcessor.mode(): FrameProcessorMode {
+  return when (this) {
+    FrameProcessor.None -> FrameProcessorMode.None
+    is FrameProcessor.Preview -> FrameProcessorMode.Preview
+    is FrameProcessor.PreviewSampled -> FrameProcessorMode.PreviewSampled
   }
+}

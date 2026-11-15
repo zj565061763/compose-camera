@@ -1,10 +1,7 @@
 package com.sd.lib.compose.camera
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Matrix
-import android.graphics.Paint
-import android.graphics.RectF
 import androidx.annotation.AnyThread
 import androidx.annotation.MainThread
 import androidx.compose.runtime.Composable
@@ -13,11 +10,15 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import java.util.concurrent.atomic.AtomicReference
+
+/** 面向活动相机会话的控制接口，新增缩放、补光灯或点按对焦等能力时统一在此扩展 */
+internal interface CameraSessionController {
+  @MainThread
+  fun requestFocus()
+}
 
 /** 创建并记住当前预览的状态 */
 @Composable
@@ -34,12 +35,14 @@ class CameraPreviewState internal constructor() {
   private val _failure = mutableStateOf<Throwable?>(null)
   private val _displayedSession = mutableStateOf<PreviewSession?>(null)
   private val _retryGeneration = mutableIntStateOf(0)
+
   private var _sessionFailure: Throwable? = null
   private var _devicesFailure: Throwable? = null
-  private var _takeScreenshotAction: ((CameraMirrorMode) -> Bitmap?)? = null
-  private var _requestFocusAction: (() -> Unit)? = null
 
-  /** 当前会话的原始帧分辨率，会话未运行时为 [IntSize.Zero] */
+  private var _takeScreenshotAction: ((CameraMirrorMode) -> Bitmap?)? = null
+  private var _sessionController: CameraSessionController? = null
+
+  /** 当前会话的帧分辨率（启用原始帧处理时为原始帧分辨率，否则为预览流分辨率），会话未运行时为 [IntSize.Zero] */
   val previewResolution: State<IntSize> = _previewResolution
 
   /** 需要重新枚举设备或重建相机会话的当前故障，其他普通异常只通过 [CameraPreview] 的 `onError` 报告 */
@@ -63,7 +66,7 @@ class CameraPreviewState internal constructor() {
    */
   @MainThread
   fun requestFocus() {
-    _requestFocusAction?.invoke()
+    _sessionController?.requestFocus()
   }
 
   /** 在外部条件恢复后关闭并重新创建当前相机会话 */
@@ -82,8 +85,8 @@ class CameraPreviewState internal constructor() {
   }
 
   /**
-   * 把 [CameraFrame] 坐标映射到 Compose 预览区域。
-   * 原始帧矩阵包含显示旋转、[ContentScale] 和目标镜像；采样帧矩阵只包含目标镜像。
+   * 把 [CameraFrame] 坐标映射到 Compose 预览区域，
+   * 原始帧矩阵包含裁剪、显示旋转、[ContentScale] 和目标镜像，采样帧矩阵只包含目标镜像。
    */
   @AnyThread
   fun createTransformToPreview(frame: CameraFrame): Matrix? {
@@ -93,18 +96,23 @@ class CameraPreviewState internal constructor() {
     val matrix = when (frame) {
       is CameraFrame.Preview -> {
         val rawFrame = snapshot.session?.rawFrame ?: return null
-        createRawFrameMatrix(frame, rawFrame, geometry) ?: return null
+        createRawFrameToPreviewMatrix(frame, rawFrame, geometry) ?: return null
       }
       is CameraFrame.PreviewSampled -> {
         if (frame.rotationDegrees != 0 || frame.dataSize != geometry.previewSize) return null
         Matrix()
       }
     }
-    if (snapshot.isMirrored) matrix.postScale(-1f, 1f, geometry.previewSize.width / 2f, 0f)
+    if (snapshot.isMirrored) {
+      applyHorizontalMirror(matrix, geometry.previewSize.width)
+    }
     return matrix
   }
 
-  internal val retryGeneration: Int get() = _retryGeneration.intValue
+  internal val retryGeneration: Int
+    get() {
+      return _retryGeneration.intValue
+    }
 
   /** 最近一次开始显示的会话，停止后保留，使旧画面在新会话首帧前维持原布局 */
   internal val displayedSession: State<PreviewSession?> = _displayedSession
@@ -179,19 +187,19 @@ class CameraPreviewState internal constructor() {
   }
 
   @MainThread
-  internal fun attachRequestFocusAction(action: () -> Unit) {
-    _requestFocusAction = action
+  internal fun attachSessionController(controller: CameraSessionController) {
+    _sessionController = controller
   }
 
   @MainThread
-  internal fun detachRequestFocusAction(action: () -> Unit) {
-    if (_requestFocusAction === action) _requestFocusAction = null
+  internal fun detachSessionController(controller: CameraSessionController) {
+    if (_sessionController === controller) _sessionController = null
   }
 
   @MainThread
   internal fun reset() {
     _takeScreenshotAction = null
-    _requestFocusAction = null
+    _sessionController = null
     _snapshot.set(PreviewSnapshot())
     _displayedSession.value = null
     _previewResolution.value = IntSize.Zero
@@ -216,31 +224,18 @@ class CameraPreviewState internal constructor() {
       geometry != current.geometry ||
       next.contentScale != current.contentScale ||
       next.isMirrored != current.isMirrored
+    val hasValidRawFrame = next.session?.rawFrame?.let { raw ->
+      raw.bufferSize.width > 0 && raw.bufferSize.height > 0 &&
+        raw.cropRect.width > 0 && raw.cropRect.height > 0
+    } != false
     val transformIdentity = when {
-      geometry == null -> null
+      geometry == null || !hasValidRawFrame -> null
       isChanged -> CameraFrameTransformIdentity()
       else -> current.transformIdentity
     }
     _snapshot.set(next.copy(geometry = geometry, transformIdentity = transformIdentity))
   }
 }
-
-/** 一次已经上屏的相机会话 */
-internal class PreviewSession(
-  /** 预览内容旋转到显示方向后的尺寸 */
-  val contentSize: IntSize,
-  val isPreviewMirrored: Boolean,
-  val resolution: IntSize,
-  /** 原始帧的缓冲区布局，未启用原始帧处理时为 `null` */
-  val rawFrame: RawFrameLayout?,
-)
-
-/** 原始帧缓冲区中与预览同视野的区域，以及把它转到显示方向所需的角度 */
-internal data class RawFrameLayout(
-  val bufferSize: IntSize,
-  val cropRect: IntRect,
-  val rotationDegrees: Int,
-)
 
 private data class PreviewSnapshot(
   val session: PreviewSession? = null,
@@ -250,107 +245,3 @@ private data class PreviewSnapshot(
   val isMirrored: Boolean = false,
   val geometry: PreviewGeometry? = null,
 )
-
-/** 预览内容在 Compose 区域中的位置，内容始终居中 */
-internal data class PreviewGeometry(
-  val previewSize: IntSize,
-  val contentSize: Size,
-  val offsetX: Float,
-  val offsetY: Float,
-  val scaleX: Float,
-  val scaleY: Float,
-)
-
-internal fun calculatePreviewGeometry(
-  contentSize: IntSize,
-  previewSize: IntSize,
-  contentScale: ContentScale,
-): PreviewGeometry? {
-  if (contentSize.width <= 0 || contentSize.height <= 0 || previewSize.width <= 0 || previewSize.height <= 0) {
-    return null
-  }
-  val scale = contentScale.computeScaleFactor(
-    srcSize = Size(contentSize.width.toFloat(), contentSize.height.toFloat()),
-    dstSize = Size(previewSize.width.toFloat(), previewSize.height.toFloat()),
-  )
-  val width = contentSize.width * scale.scaleX
-  val height = contentSize.height * scale.scaleY
-  if (!width.isFinite() || !height.isFinite() || width <= 0f || height <= 0f) return null
-  return PreviewGeometry(
-    previewSize = previewSize,
-    contentSize = Size(width, height),
-    offsetX = (previewSize.width - width) / 2f,
-    offsetY = (previewSize.height - height) / 2f,
-    scaleX = scale.scaleX,
-    scaleY = scale.scaleY,
-  )
-}
-
-/** 原始帧坐标依次经过裁剪、旋转、缩放和居中，映射到 Compose 预览区域 */
-private fun createRawFrameMatrix(
-  frame: CameraFrame.Preview,
-  rawFrame: RawFrameLayout,
-  geometry: PreviewGeometry,
-): Matrix? {
-  if (frame.width != rawFrame.bufferSize.width || frame.height != rawFrame.bufferSize.height) return null
-  if (normalizeRotation(frame.rotationDegrees) != rawFrame.rotationDegrees) return null
-  val crop = rawFrame.cropRect
-  val orientedSize = crop.size.rotate(rawFrame.rotationDegrees)
-  return createRotationMatrix(crop.width, crop.height, rawFrame.rotationDegrees).apply {
-    preTranslate(-crop.left.toFloat(), -crop.top.toFloat())
-    postScale(
-      geometry.contentSize.width / orientedSize.width,
-      geometry.contentSize.height / orientedSize.height,
-    )
-    postTranslate(geometry.offsetX, geometry.offsetY)
-  }
-}
-
-/** 把 [width] × [height] 的区域顺时针旋转 [rotationDegrees]，结果仍从原点开始 */
-private fun createRotationMatrix(width: Int, height: Int, rotationDegrees: Int): Matrix {
-  val (translateX, translateY) = when (rotationDegrees) {
-    90 -> height to 0
-    180 -> width to height
-    270 -> 0 to width
-    else -> 0 to 0
-  }
-  return Matrix().apply {
-    setRotate(rotationDegrees.toFloat())
-    postTranslate(translateX.toFloat(), translateY.toFloat())
-  }
-}
-
-/** 把预览控件截图绘制到 Compose 预览区域并按需水平翻转，[source] 总会被回收或直接转交 */
-internal fun renderPreviewBitmap(source: Bitmap, geometry: PreviewGeometry, shouldMirror: Boolean): Bitmap {
-  val size = geometry.previewSize
-  val isDirect = !shouldMirror &&
-    source.width == size.width && source.height == size.height &&
-    geometry.offsetX == 0f && geometry.offsetY == 0f
-  if (isDirect) return source
-  return try {
-    Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).also { output ->
-      Canvas(output).apply {
-        if (shouldMirror) scale(-1f, 1f, size.width / 2f, 0f)
-        val destination = RectF(
-          geometry.offsetX,
-          geometry.offsetY,
-          geometry.offsetX + geometry.contentSize.width,
-          geometry.offsetY + geometry.contentSize.height,
-        )
-        drawBitmap(source, null, destination, Paint(Paint.FILTER_BITMAP_FLAG))
-      }
-    }
-  } finally {
-    source.recycle()
-  }
-}
-
-internal fun IntSize.rotate(rotationDegrees: Int): IntSize {
-  return if (rotationDegrees % 180 == 0) this else IntSize(height, width)
-}
-
-internal fun normalizeRotation(rotationDegrees: Int): Int {
-  val normalized = ((rotationDegrees % 360) + 360) % 360
-  require(normalized % 90 == 0) { "rotationDegrees must be a multiple of 90." }
-  return normalized
-}

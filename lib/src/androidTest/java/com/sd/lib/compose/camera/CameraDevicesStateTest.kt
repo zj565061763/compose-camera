@@ -71,7 +71,9 @@ private class FakeCameraDevicesSource : CameraDevicesSource {
     _callbacks.addLast(onResult)
   }
 
-  fun takeCallback(): (Result<List<CameraDeviceInfo>>) -> Unit = _callbacks.removeFirst()
+  fun takeCallback(): (Result<List<CameraDeviceInfo>>) -> Unit {
+    return _callbacks.removeFirst()
+  }
 
   fun complete(result: Result<List<CameraDeviceInfo>>) {
     takeCallback().invoke(result)

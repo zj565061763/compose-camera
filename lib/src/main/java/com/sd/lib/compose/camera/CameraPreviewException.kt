@@ -6,7 +6,7 @@ import androidx.camera.core.CameraState
 class CameraPreviewException internal constructor(
   val reason: Reason,
   message: String,
-  /** 相机后端报告的错误码，只用于诊断 */
+  /** 相机错误码，仅用于诊断 */
   val cameraErrorCode: Int? = null,
   cause: Throwable? = null,
 ) : RuntimeException(message, cause) {

@@ -36,6 +36,7 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.rules.TestRule
 import org.junit.runner.RunWith
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -137,14 +138,27 @@ class CameraPreviewIntegrationTest {
       if (isShown) CameraPreview(modifier = Modifier.size(240.dp), state = state, onError = error::set)
     }
     waitForSession(state, error)
+    _composeRule.waitForIdle()
 
-    _composeRule.runOnIdle {
-      val mirrored = checkNotNull(state.takeScreenshot(CameraMirrorMode.ON))
-      val unmirrored = checkNotNull(state.takeScreenshot(CameraMirrorMode.OFF))
-      assertThat(IntSize(mirrored.width, mirrored.height)).isEqualTo(dpSize(240))
-      assertThat(mirroredDifference(mirrored, unmirrored)).isLessThan(16.0)
-      mirrored.recycle()
-      unmirrored.recycle()
+    // 真机首帧刚打开时可能处于自动曝光跳变阶段，等待连续两次截图画面稳定后校验镜像一致性
+    _composeRule.waitUntil(TIMEOUT_MILLIS) {
+      _composeRule.runOnUiThread {
+        val mirrored = state.takeScreenshot(CameraMirrorMode.ON) ?: return@runOnUiThread false
+        val unmirrored = state.takeScreenshot(CameraMirrorMode.OFF)
+        if (unmirrored == null) {
+          mirrored.recycle()
+          return@runOnUiThread false
+        }
+        try {
+          val expectedSize = dpSize(240)
+          IntSize(mirrored.width, mirrored.height) == expectedSize &&
+            IntSize(unmirrored.width, unmirrored.height) == expectedSize &&
+            mirroredDifference(mirrored, unmirrored) < 16.0
+        } finally {
+          mirrored.recycle()
+          unmirrored.recycle()
+        }
+      }
     }
     isShown = false
     _composeRule.runOnIdle { assertThat(state.takeScreenshot()).isNull() }
@@ -204,7 +218,7 @@ class CameraPreviewIntegrationTest {
 
   @Test
   fun exactCameraId_startsEveryAvailableCamera() {
-    val cameraIds = cameraInfos().map { it.cameraIdString }
+    val cameraIds = cameraInfos().mapNotNull { it.cameraIdOrNull() }
     assumeTrue(cameraIds.isNotEmpty())
     val state = CameraPreviewState()
     var cameraId by mutableStateOf<String?>(null)
@@ -236,7 +250,7 @@ class CameraPreviewIntegrationTest {
     val context = InstrumentationRegistry.getInstrumentation().targetContext
     val platformIds = (context.getSystemService(Context.CAMERA_SERVICE) as CameraManager).cameraIdList.toList()
     val deviceIds = _composeRule.runOnIdle { devicesState.devices.value.map { it.cameraId } }
-    assertThat(deviceIds).containsExactlyElementsIn(cameraInfos().map { it.cameraIdString })
+    assertThat(deviceIds).containsExactlyElementsIn(cameraInfos().mapNotNull { it.cameraIdOrNull() })
     assertThat(deviceIds).isEqualTo(platformIds.filter { it in deviceIds })
   }
 
@@ -262,6 +276,81 @@ class CameraPreviewIntegrationTest {
     }
     assertThat(error.get()).isNull()
     _composeRule.runOnIdle { assertThat(state.isFrameTransformCurrent(token)).isFalse() }
+  }
+
+  @Test
+  fun retry_waitsForPendingRefreshAndHandlesConsecutiveRetries() {
+    val source = QueuedDevicesSource()
+    val devicesState = CameraDevicesState()
+    val loader = CameraDevicesLoader(devicesState, source)
+    val state = CameraPreviewState()
+    val errors = CopyOnWriteArrayList<Throwable>()
+    _composeRule.runOnIdle {
+      devicesState.attachRefreshAction(loader::refresh)
+      loader.refresh()
+    }
+
+    _composeRule.setContent {
+      CameraPreview(
+        modifier = Modifier.size(240.dp),
+        state = state,
+        devicesState = devicesState,
+        onError = errors::add,
+      )
+    }
+
+    val error1 = IllegalStateException("load-1")
+    _composeRule.runOnIdle { source.completeNext(Result.failure(error1)) }
+    _composeRule.runOnIdle {
+      assertThat(state.failure.value).isSameInstanceAs(error1)
+      assertThat(errors).containsExactly(error1)
+    }
+
+    // 第一次 retry() 立即清空故障并触发刷新，刷新完成前不得写回旧错误
+    _composeRule.runOnIdle { state.retry() }
+    _composeRule.runOnIdle {
+      assertThat(source.pendingCount).isEqualTo(1)
+      assertThat(state.failure.value).isNull()
+      assertThat(errors).containsExactly(error1)
+    }
+
+    // 同一次主线程轮次内前一次刷新失败且紧接着再次 retry()，第二次刷新不得被跳过或被旧错误覆盖
+    val error2 = IllegalStateException("load-2")
+    _composeRule.runOnIdle {
+      source.completeNext(Result.failure(error2))
+      state.retry()
+    }
+    _composeRule.runOnIdle {
+      assertThat(source.pendingCount).isEqualTo(1)
+      assertThat(state.failure.value).isNull()
+      assertThat(errors).containsExactly(error1)
+    }
+
+    val error3 = IllegalStateException("load-3")
+    _composeRule.runOnIdle { source.completeNext(Result.failure(error3)) }
+    _composeRule.runOnIdle {
+      assertThat(state.failure.value).isSameInstanceAs(error3)
+      assertThat(errors).containsExactly(error1, error3).inOrder()
+    }
+
+    // 刷新进行中连续调用 retry() 时忽略旧请求结果，只发布最新一次刷新结果
+    _composeRule.runOnIdle { state.retry() }
+    _composeRule.runOnIdle { state.retry() }
+    _composeRule.runOnIdle {
+      assertThat(source.pendingCount).isEqualTo(2)
+      source.completeNext(Result.failure(IllegalStateException("stale")))
+    }
+    _composeRule.runOnIdle {
+      assertThat(state.failure.value).isNull()
+    }
+
+    val error4 = IllegalStateException("load-4")
+    _composeRule.runOnIdle { source.completeNext(Result.failure(error4)) }
+    _composeRule.runOnIdle {
+      assertThat(state.failure.value).isSameInstanceAs(error4)
+      assertThat(errors).containsExactly(error1, error3, error4).inOrder()
+      loader.close()
+    }
   }
 
   @Test
@@ -386,60 +475,80 @@ class CameraPreviewIntegrationTest {
     assertThat(error.get()).isNull()
   }
 
-  private fun assumeCameraAvailable() {
-    assumeTrue(cameraInfos().isNotEmpty())
-  }
-
-  private fun cameraInfos(): List<CameraInfo> {
-    val context = InstrumentationRegistry.getInstrumentation().targetContext
-    return ProcessCameraProvider.getInstance(context).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).availableCameraInfos
-  }
-
   private fun dpSize(width: Int, height: Int = width): IntSize {
     val density = _composeRule.activity.resources.displayMetrics.density
     return IntSize((width * density).roundToInt(), (height * density).roundToInt())
   }
+}
 
-  /** 比较 [mirrored] 与水平翻转后的 [unmirrored]，返回采样点的平均通道差 */
-  private fun mirroredDifference(mirrored: Bitmap, unmirrored: Bitmap): Double {
-    var total = 0L
-    var count = 0
-    for (y in 0 until mirrored.height step 8) {
-      for (x in 0 until mirrored.width step 8) {
-        val a = mirrored.getPixel(x, y)
-        val b = unmirrored.getPixel(mirrored.width - 1 - x, y)
-        total += abs(Color.red(a) - Color.red(b)) + abs(Color.green(a) - Color.green(b)) + abs(Color.blue(a) - Color.blue(b))
-        count += 3
-      }
+private const val TIMEOUT_SECONDS = 10L
+private const val TIMEOUT_MILLIS = TIMEOUT_SECONDS * 1_000
+
+private fun assumeCameraAvailable() {
+  assumeTrue(cameraInfos().isNotEmpty())
+}
+
+private fun cameraInfos(): List<CameraInfo> {
+  val context = InstrumentationRegistry.getInstrumentation().targetContext
+  return ProcessCameraProvider.getInstance(context).get(TIMEOUT_SECONDS, TimeUnit.SECONDS).availableCameraInfos
+}
+
+/** 比较 [mirrored] 与水平翻转后的 [unmirrored]，返回采样点的平均通道差 */
+private fun mirroredDifference(mirrored: Bitmap, unmirrored: Bitmap): Double {
+  var total = 0L
+  var count = 0
+  for (y in 0 until mirrored.height step 8) {
+    for (x in 0 until mirrored.width step 8) {
+      val a = mirrored.getPixel(x, y)
+      val b = unmirrored.getPixel(mirrored.width - 1 - x, y)
+      total += abs(Color.red(a) - Color.red(b)) + abs(Color.green(a) - Color.green(b)) + abs(Color.blue(a) - Color.blue(b))
+      count += 3
     }
-    return total.toDouble() / count
+  }
+  return total.toDouble() / count
+}
+
+private fun findPreviewView(view: View): PreviewView? {
+  if (view is PreviewView) return view
+  if (view !is ViewGroup) return null
+  repeat(view.childCount) { index ->
+    findPreviewView(view.getChildAt(index))?.also { return it }
+  }
+  return null
+}
+
+private data class FrameResult(
+  val size: IntSize,
+  val dataSize: Int,
+  val rotationDegrees: Int,
+  val bitmapSize: IntSize?,
+  val threadName: String,
+)
+
+private class QueuedDevicesSource : CameraDevicesSource {
+  private val _callbacks = ArrayDeque<(Result<List<CameraDeviceInfo>>) -> Unit>()
+
+  val pendingCount: Int
+    get() {
+      return _callbacks.size
+    }
+
+  override fun load(onResult: (Result<List<CameraDeviceInfo>>) -> Unit) {
+    _callbacks.addLast(onResult)
   }
 
-  private fun findPreviewView(view: View): PreviewView? {
-    if (view is PreviewView) return view
-    if (view !is ViewGroup) return null
-    repeat(view.childCount) { index -> findPreviewView(view.getChildAt(index))?.also { return it } }
-    return null
-  }
-
-  private data class FrameResult(
-    val size: IntSize,
-    val dataSize: Int,
-    val rotationDegrees: Int,
-    val bitmapSize: IntSize?,
-    val threadName: String,
-  )
-
-  private companion object {
-    const val TIMEOUT_SECONDS = 10L
-    const val TIMEOUT_MILLIS = TIMEOUT_SECONDS * 1_000
+  fun completeNext(result: Result<List<CameraDeviceInfo>>) {
+    _callbacks.removeFirst().invoke(result)
   }
 }
 
 private class FakeLifecycleOwner : LifecycleOwner {
   private val _registry = LifecycleRegistry(this)
 
-  override val lifecycle: Lifecycle get() = _registry
+  override val lifecycle: Lifecycle
+    get() {
+      return _registry
+    }
 
   fun start() {
     _registry.currentState = Lifecycle.State.STARTED

@@ -26,6 +26,7 @@ class CameraDevicesState internal constructor() {
   private val _hasLoadedDevices = mutableStateOf(false)
   private val _error = mutableStateOf<Throwable?>(null)
   private val _refreshVersion = mutableIntStateOf(0)
+
   private var _refreshAction: (() -> Unit)? = null
 
   /** 最近一次枚举到的摄像头 */
@@ -45,7 +46,14 @@ class CameraDevicesState internal constructor() {
   /** 主动重新读取摄像头列表 */
   @MainThread
   fun refresh() {
-    _refreshAction?.invoke()
+    requestRefresh()
+  }
+
+  @MainThread
+  internal fun requestRefresh(): Boolean {
+    val action = _refreshAction ?: return false
+    action.invoke()
+    return true
   }
 
   @MainThread

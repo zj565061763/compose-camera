@@ -2,11 +2,7 @@ package com.sd.lib.compose.camera
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
 import androidx.compose.ui.unit.IntSize
-import java.io.ByteArrayOutputStream
 
 /** 摄像头预览产生的分析帧 */
 sealed interface CameraFrame {
@@ -19,8 +15,8 @@ sealed interface CameraFrame {
   /**
    * 原始 NV21 预览帧
    *
-   * [data] 只在 [FrameProcessor.Preview.onFrame] 回调期间有效；需要异步处理时应复制数据，
-   * 或先通过 [toBitmap] 创建独立图片。[width] 和 [height] 表示未旋转的原始帧尺寸。
+   * [data] 只在 [FrameProcessor.Preview.onFrame] 回调期间有效；需要异步处理时应复制数据，或先通过 [toBitmap] 创建独立图片。
+   * [width] 和 [height] 表示未旋转的原始帧尺寸。
    */
   class Preview internal constructor(
     val data: ByteArray,
@@ -59,11 +55,4 @@ sealed interface CameraFrame {
     // 回调结束后 data 会被回收，计算坐标矩阵时使用创建时记录的尺寸
     internal val dataSize = IntSize(data.width, data.height)
   }
-}
-
-internal fun nv21ToJpeg(data: ByteArray, width: Int, height: Int): ByteArray? {
-  val output = ByteArrayOutputStream()
-  val compressed = YuvImage(data, ImageFormat.NV21, width, height, null).compressToJpeg(Rect(0, 0, width, height), 100, output)
-  if (!compressed) return null
-  return output.toByteArray()
 }
